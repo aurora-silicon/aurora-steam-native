@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Steam
+GenericName=Game Client
+Comment=Play and manage your Steam games
+Exec=steam-native4k %U
+TryExec=steam-native4k
+Icon=steam-native-arm64
+Terminal=false
+Categories=Game;
+MimeType=x-scheme-handler/steam;
+StartupNotify=true
+StartupWMClass=Steam

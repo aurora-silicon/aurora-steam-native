@@ -1,0 +1,20 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Ryan Murray <ryan@aurorasilicon.org>
+#
+# Start the native ARM64 Steam client. The GPU driver selection is inherited
+# from the session; this wrapper only keeps Steam's embedded browser on Zink.
+set -euo pipefail
+if [ -z "${AURORA_STEAM_ROOT:-}" ]; then
+	AURORA_STEAM_ROOT=$(readlink -f -- "$HOME/.steam/root" 2>/dev/null || true)
+fi
+[ -n "$AURORA_STEAM_ROOT" ] && [ -x "$AURORA_STEAM_ROOT/steamrtarm64/steam" ] || {
+	echo "No native ARM64 Steam install found; run install-steam-arm64.py first" >&2
+	exit 2
+}
+export AURORA_STEAM_ROOT
+export MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-zink}
+export GALLIUM_DRIVER=${GALLIUM_DRIVER:-zink}
+export LIBGL_KOPPER_DISABLE=${LIBGL_KOPPER_DISABLE:-true}
+AURORA_STEAM_LIBEXEC=${AURORA_STEAM_LIBEXEC:-$(dirname -- "$(readlink -f -- "$0")")/../libexec}
+exec "$AURORA_STEAM_LIBEXEC/steam-native4k-launch-loop.sh" "$@"
