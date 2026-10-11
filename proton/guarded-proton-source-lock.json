@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "status": "historical-build-recovered; current-installed-tool correspondence must be checked",
+  "base": {
+    "repo": "https://github.com/GloriousEggroll/proton-ge-custom",
+    "commit": "c191f35dcebbeccfacd3b4c6f6eea026e588c1c2",
+    "release": "GE-Proton11-7",
+    "asset": "GE-Proton11-7-aarch64.tar.gz",
+    "asset_sha256": "b77ac906186568c2f3c66674b85c712b145ccf73ff2718a50dd7bf6248b67ba3",
+    "asset_sha512": "741cf70256f13b20d44952b590defd68b115814097f911c9ec053a64d33795267e2a982a5ce939407e8b649613eb3943bb2e2ebf4794d302ff96b83b61457cdd"
+  },
+  "wine": {
+    "repo": "https://github.com/ValveSoftware/wine",
+    "commit": "46b29104e3741fe23bf5e2547196a253aab88c89",
+    "wine_staging_repo": "https://github.com/wine-staging/wine-staging",
+    "wine_staging_commit": "6cc805ea57132eeaf44764e9213823c9b8d0d300",
+    "preparation": "GE release Wine patch queue and Wine-staging; vendor preparation precedes payload guard",
+    "prepared_manifest_sha256": "d6ae4567cd14a43b6669919caaf8b22f1a60830e672ba278e7642595f8781d7e",
+    "prepared_source_archive_sha256": "a81308105d1e1096089e95f68e84ab482a2d2d7818f86b1f0c0460d1446fc65f",
+    "prepared_source_files": 11238,
+    "upstream_preparation_script": "https://github.com/GloriousEggroll/proton-ge-custom/blob/c191f35dcebbeccfacd3b4c6f6eea026e588c1c2/patches/protonprep-valve-staging.sh",
+    "upstream_preparation_script_git_blob": "e3cb46452d4fc40648128be91c1abb1fb8d34075",
+    "historical_wine_only_preparer_sha256": "95d938ced170af76456602a62425ff49c959d1123604e7a264121f9ab12f4d4d"
+  },
+  "guard": {
+    "repo": "https://github.com/aurora-silicon/aurora-steam-native",
+    "source_commit": "23a1b18d1af6abba724f3bcfd301dd34e0bdbba7",
+    "path": "proton/wine-arm64-sve-payload-guard.patch",
+    "public_patch_sha256": "db9da41be4dda3cb89cfec3d6ad7360a7260de023a3007048542202ab57106fe",
+    "diff_section_sha256": "0ae7ed33b7525c6e7e90292115f084bcfb1225e48585ca31955b62bb03a6e6d5",
+    "prepared_ge_signal_source_after_guard_sha256": "71cfe3e7d9d4ce7603d5a9b368b3ab9dd021c83b5e28a471f420fb5b5bf30509",
+    "historical_unix_ntdll_sha256": "3873e000c3a04b2d1bb6929d23a1ebb8da93046a3f9476d65df90f444f90836d"
+  },
+  "fex": {
+    "repo": "https://github.com/FEX-Emu/FEX",
+    "vendor_ge_commit": "82510eb452b258959ef982be58a9c3c1bafc82a4",
+    "custom_bridge_commit": "3648ee97e8354bb2e6757da8bdb00c48439a561d",
+    "custom_source_changes": "none recorded; build options only",
+    "source_submodule_archive_sha256": "e39652a0360638b7668dc5ccce8ba112746b0316ecedcf799d2fb7956622093f",
+    "custom_bridge_files": [
+      "files/lib/wine/aarch64-windows/libarm64ecfex.dll",
+      "files/lib/wine/aarch64-windows/libwow64fex.dll",
+      "files/lib/wine/aarch64-unix/libarm64ecfex.so",
+      "files/lib/wine/aarch64-unix/libwow64fex.so"
+    ],
+    "cmake": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "ENABLE_LTO": "OFF",
+      "BUILD_TESTING": "OFF",
+      "BUILD_STEAM_SUPPORT": "ON",
+      "ENABLE_FEXCORE_PROFILER": "ON",
+      "TUNE_CPU": "none",
+      "RANGES_NATIVE": "OFF",
+      "ENABLE_CCACHE": "OFF"
+    }
+  },
+  "vendor_graph": {
+    "dxvk_commit": "601930949d111edbbcf9dd463948426d9f8f6ddd",
+    "vkd3d_proton_commit": "af89350cc2eacd9da2293fbae96bd9ab4987c9bb"
+  },
+  "toolchain": {
+    "llvm_mingw_url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-ubuntu-22.04-aarch64.tar.xz",
+    "archive_sha256": "07d21263c56bfe9a713db6fdb3f7434bf4c121a005e40397d3b4c0170fb06769",
+    "version": "LLVM 23.1.2",
+    "independent_publisher_digest_verified_at_original_build": false,
+    "unix_wine_compiler": "native Fedora clang; exact compiler/package manifest not yet recovered",
+    "publisher_digest_verified_during_source_recovery": true
+  },
+  "wine_generator_inputs": {
+    "vulkan_docs_tag": "v1.4.357",
+    "vk_xml_sha256": "264d0d7350e37d70c82407fb430d085040fc01a9a961d43dec8c2d6ed1dfd183",
+    "video_xml_sha256": "d018b914014c06605e367a3b929670511e6f6de2f225c405a8b5e2d912408b76"
+  },
+  "unix_ntdll_build": {
+    "regeneration": [
+      "autoreconf -f",
+      "tools/make_requests",
+      "tools/make_specfiles"
+    ],
+    "configure": [
+      "--enable-archs=arm64ec,aarch64,x86_64,i386",
+      "--with-mingw=clang",
+      "--disable-tests"
+    ],
+    "target": "make -j1 dlls/ntdll/ntdll.so",
+    "observed_max_glibc": "2.38",
+    "steam_runtime_correspondence": "must validate actual loaded Unix library in a real Steam-managed game"
+  },
+  "missing_for_complete_reproduction": [
+    "Published Wine-only preparation subset and source-file manifest matching the recovered digest; official full GE preparation script is public",
+    "Exact Fedora clang/autoconf/package versions or build-image digest",
+    "Current AURORA-GUARDED-BUILD.json and correspondence for current PE/server/four-FEX-module hashes",
+    "Current clean wrapper SHA after latest hook removal",
+    "Runtime proof of the actual game tool and loaded public Mesa; no Steam authentication files required"
+  ],
+  "historical_artifact_sha256": {
+    "files/lib/wine/aarch64-unix/ntdll.so": "3873e000c3a04b2d1bb6929d23a1ebb8da93046a3f9476d65df90f444f90836d",
+    "files/lib/wine/aarch64-windows/ntdll.dll": "240ea49f0a94e4ef6b18f5cbc3c7a770b254a4cf1d063ff4bee1882a631a3c8f",
+    "files/bin-arm64/wine": "164ccd6b3ea7ab98aae8ffacc744058830eda19661d5c667d5476dc29b4b0d33",
+    "files/bin-arm64/wineserver": "19854c7b46328b4a4e4bc35b723b3b78191550d99cf2c99cd8784e5896a81125",
+    "files/lib/wine/aarch64-unix/libarm64ecfex.so": "2f952bdbb3a9e2b1f11939e76443ddaa87a4478aedecb01e7591e5fd0bbb0a54",
+    "files/lib/wine/aarch64-unix/libwow64fex.so": "6b7bf8df6341ae5c2e9ed1ab395fea2f19aee775a2ee00cbd68ac4fcd6370f63",
+    "files/lib/wine/aarch64-windows/libarm64ecfex.dll": "ca6697784e877e9dc4e7f946056a6a34551445d4a71cbabcc71ba25f4f03d78c",
+    "files/lib/wine/aarch64-windows/libwow64fex.dll": "f8bdce1f2deab9f8bc59738664d3944b9da28ca39e780e7088b52bf330b7f187"
+  }
+}
