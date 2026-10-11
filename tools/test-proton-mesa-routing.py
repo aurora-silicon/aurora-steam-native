@@ -103,6 +103,20 @@ class RoutingTests(unittest.TestCase):
         finally:
             child.terminate(); child.wait()
 
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux process inventory')
+    def test_interpreted_launcher_outside_tool_cwd(self):
+        script = self.wrapper.parent / 'proton'
+        script.write_text('import time; time.sleep(30)')
+        child = subprocess.Popen([sys.executable, str(script)], cwd=self.root)
+        try:
+            result = self.cli('apply', self.before, self.record)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('in use', result.stderr)
+            self.assertEqual(self.wrapper.read_bytes(), OLD)
+            self.assertFalse(self.record.exists())
+        finally:
+            child.terminate(); child.wait()
+
     def test_artifact_audit(self):
         artifact = self.wrapper.parent / 'files' / 'ntdll.so'
         artifact.parent.mkdir(); artifact.write_bytes(b'fixture')
