@@ -13,6 +13,12 @@ class Routing(unittest.TestCase):
   r=subprocess.run([str(ROOT/'bin/steam-native4k'),'steam://open/games','arg with spaces'],env=self.env(),capture_output=True,text=True,check=True);d=json.loads(r.stdout);self.assertEqual(d['helper'],'/usr/libexec/aurora/userpages');self.assertEqual(d['root'],str(self.client.resolve()));self.assertEqual(d['args'],['steam://open/games','arg with spaces'])
  def test_explicit_reviewed_override(self):
   r=subprocess.run([str(ROOT/'bin/steam-native4k')],env=self.env(AURORA_USERPAGES_LAUNCHER='/reviewed/helper'),capture_output=True,text=True,check=True);self.assertEqual(json.loads(r.stdout)['helper'],'/reviewed/helper')
+ def test_direct_loop_exports_shell_local_selection(self):
+  helper=self.home/'helper';helper.write_text('#!/usr/bin/python3\nimport os\nprint(os.environ.get("AURORA_USERPAGES_LAUNCHER","MISSING"))\n');helper.chmod(0o755);log=self.home/'loop.log'
+  env=self.env(AURORA_STEAM_ROOT=str(self.client),AURORA_STEAM_CONSOLE_LOG=str(log))
+  # Shell-local value is not exported by the caller; the public loop must export it.
+  r=subprocess.run(['/bin/bash','-c','AURORA_USERPAGES_LAUNCHER="$1"; source "$2"','offline',str(helper),str(ROOT/'libexec/steam-native4k-launch-loop.sh')],env=env,capture_output=True,text=True)
+  self.assertEqual(r.returncode,0,r.stderr);self.assertIn(str(helper),log.read_text());self.assertNotIn('MISSING',log.read_text())
  def test_loop_missing_helper_fails_before_client(self):
   r=subprocess.run([str(ROOT/'libexec/steam-native4k-launch-loop.sh')],env=self.env(AURORA_STEAM_ROOT=str(self.client),AURORA_USERPAGES_LAUNCHER=str(self.home/'missing')),capture_output=True,text=True);self.assertEqual(r.returncode,2);self.assertIn('launcher not found',r.stderr)
 if __name__=='__main__':unittest.main()
