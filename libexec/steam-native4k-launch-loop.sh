@@ -7,7 +7,7 @@
 set -euo pipefail
 : "${AURORA_STEAM_ROOT:?native Valve Steam root required}"
 # userpages is built from tools/aurora-userpages in the aurora-silicon/linux tree.
-AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-$(command -v userpages || echo /usr/libexec/aurora/userpages)}
+export AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-/usr/libexec/aurora/userpages}
 [ -x "$AURORA_USERPAGES_LAUNCHER" ] || { echo "userpages launcher not found: $AURORA_USERPAGES_LAUNCHER" >&2; exit 2; }
 [ -x "$AURORA_STEAM_ROOT/steamrtarm64/steam" ]
 export AURORA_STEAM_ROOT
