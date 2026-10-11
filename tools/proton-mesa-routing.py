@@ -126,8 +126,10 @@ def active_tool_processes(tool):
         try:
             paths = [Path(os.readlink(p / k)) for k in ("exe", "cwd")]
             comm = (p / "comm").read_text().strip()
-            if comm.startswith(("wine", "FEX", "proton", "reaper")):
-                paths += [Path(a.decode(errors="replace")) for a in (p / "cmdline").read_bytes().split(b"\0") if a.startswith(b"/")]
+            argv = (p / "cmdline").read_bytes().split(b"\0")
+            selected = argv if comm.startswith(("wine", "FEX", "proton", "reaper")) else argv[:2]
+            paths += [Path(a.decode(errors="replace")) for a in selected if a.startswith(b"/")]
+            paths = [x.resolve(strict=False) for x in paths]
             if any(x == tool or tool in x.parents for x in paths):
                 found.append(int(p.name))
         except (OSError, ValueError):
