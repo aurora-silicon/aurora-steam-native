@@ -100,7 +100,10 @@ def transform(data, retired):
             if len(value) < 2 or not value.endswith(quote) or quote in value[1:-1]:
                 raise ValueError(f"line {number}: unsupported quoting")
             value = value[1:-1]
-        elif any(c.isspace() or c in "'\"" for c in value):
+        elif any(c.isspace() or c in "'\"|&<>()" for c in value):
+            # Without quotes these characters are shell syntax, not part of
+            # an environment path. Do not delete a pipeline/redirection along
+            # with the retired atom. Quoted literal path characters stay valid.
             raise ValueError(f"line {number}: non-literal assignment")
         atoms = split_paths(value, name)
         kept = [a for a in atoms if not any(a == p or a.startswith(p + "/") for p in retired)]

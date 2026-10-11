@@ -51,6 +51,29 @@ class RoutingTests(unittest.TestCase):
                      b'export LD_LIBRARY_PATH="${PREFIX:-/legacy/mesa/lib}"\n', b'export LD_LIBRARY_PATH=/legacy/mesa/lib; echo extra\n'):
             with self.subTest(data=data), self.assertRaises(ValueError): routing.transform(data, ['/legacy/mesa'])
 
+    def test_unquoted_redirection_and_pipeline_refused(self):
+        for data in (b'export LD_LIBRARY_PATH=/legacy/mesa/lib>/tmp/log\n',
+                     b'export LD_LIBRARY_PATH=/legacy/mesa/lib|cat\n'):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                routing.transform(data, ['/legacy/mesa'])
+
+    def test_apply_shell_operator_refusal_is_unchanged(self):
+        for data in (b'export LD_LIBRARY_PATH=/legacy/mesa/lib>/tmp/log\n',
+                     b'export LD_LIBRARY_PATH=/legacy/mesa/lib|cat\n'):
+            with self.subTest(data=data):
+                self.wrapper.write_bytes(data)
+                result = self.cli('apply', routing.digest(data), self.record)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn('non-literal assignment', result.stderr)
+                self.assertEqual(self.wrapper.read_bytes(), data)
+                self.assertFalse(self.record.exists())
+                self.assertEqual(list(self.wrapper.parent.glob('*.bak')), [])
+
+    def test_quoted_literal_operator_character_is_preserved(self):
+        data = b'export LD_LIBRARY_PATH="/legacy/mesa/lib:/public/lib|named:${LD_LIBRARY_PATH:-}"\n'
+        result, _ = routing.transform(data, ['/legacy/mesa'])
+        self.assertEqual(result, b'export LD_LIBRARY_PATH="/public/lib|named:${LD_LIBRARY_PATH:-}"\n')
+
     def test_ambiguous_prefix_refused(self):
         for value in ('/', '/opt', '/opt/../', '/legacy/mesa*'):
             with self.subTest(value=value), self.assertRaises(ValueError): routing.prefixes([value])
