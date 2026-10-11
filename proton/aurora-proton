@@ -1,0 +1,20 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Ryan Murray <ryan@aurorasilicon.org>
+# Public GE ARM64 Proton CLI, executed under the published userpages 4K launcher.
+set -euo pipefail
+TOOL=$(dirname -- "$(readlink -f -- "$0")")
+for file in proton files/bin-arm64/wine files/bin-arm64/wineserver; do
+  [ -f "$TOOL/$file" ] || { echo "Missing native Proton component: $file" >&2; exit 2; }
+done
+[ -x "$TOOL/files/bin-arm64/wine" ] && [ -x "$TOOL/files/bin-arm64/wineserver" ] || {
+  echo 'Native Wine components are not executable' >&2; exit 2;
+}
+AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-$(command -v userpages || echo /usr/libexec/aurora/userpages)}
+[ -x "$AURORA_USERPAGES_LAUNCHER" ] || { echo 'Public userpages launcher missing' >&2; exit 2; }
+# GE's public launcher selects these same native binaries for PROTON_USE_ARM64=1.
+export PROTON_USE_ARM64=1
+export WINESERVER="$TOOL/files/bin-arm64/wineserver"
+# GE configures its Wine library directories and native FEX bridges. Keep its
+# normal CLI/Steam environment and use the session's public graphics drivers.
+exec "$AURORA_USERPAGES_LAUNCHER" 4k /usr/bin/python3 "$TOOL/proton" "$@"
