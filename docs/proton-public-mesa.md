@@ -56,7 +56,10 @@ with repeated `--retire-prefix`. The helper changes only `LD_LIBRARY_PATH`,
 `__EGL_VENDOR_LIBRARY_FILENAMES` and `DRIRC_CONFIGDIR`. It preserves other public
 path-list entries, refuses complex shell expressions or unhandled prefix
 references, and runs Bash syntax validation. It checks for tool processes,
-refuses symlinks/hard links and stale hashes, preserves owner/mode, creates a
+recognizes Python and shell script launchers with common flags (including
+Python `-W`/`-X` and shell `-o`/`-O` parameters), without treating `-c`/`-m`/stdin
+or later data arguments as script paths. Unknown interpreter options are not
+inferred. It refuses symlinks/hard links and stale hashes, preserves owner/mode, creates a
 hash-verified backup and atomically replaces the wrapper. It adds no runtime
 instrumentation or launcher hook.
 

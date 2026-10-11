@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -139,6 +140,74 @@ class RoutingTests(unittest.TestCase):
             self.assertFalse(self.record.exists())
         finally:
             child.terminate(); child.wait()
+
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux process inventory')
+    def test_flagged_python_launchers(self):
+        script = self.wrapper.parent / 'proton'
+        script.write_text('import time; time.sleep(30)')
+        for flags in (['-Es'], ['-W', 'ignore', '-X', 'dev']):
+            with self.subTest(flags=flags):
+                child = subprocess.Popen([sys.executable, *flags, str(script)], cwd=self.root)
+                try:
+                    result = self.cli('apply', self.before, self.record)
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    self.assertIn('in use', result.stderr)
+                    self.assertEqual(self.wrapper.read_bytes(), OLD)
+                    self.assertFalse(self.record.exists())
+                finally:
+                    child.terminate(); child.wait()
+
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux process inventory')
+    def test_flagged_shell_launchers(self):
+        script = self.wrapper.parent / 'proton-shell'
+        # Keep bash alive rather than optimizing its last command into exec.
+        script.write_text('sleep 30\n:\n')
+        for flags in (['--'], ['-o', 'errexit', '--'], ['-O', 'extglob', '--']):
+            with self.subTest(flags=flags):
+                child = subprocess.Popen(['bash', *flags, str(script)], cwd=self.root, start_new_session=True)
+                try:
+                    result = self.cli('apply', self.before, self.record)
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    self.assertIn('in use', result.stderr)
+                    self.assertEqual(self.wrapper.read_bytes(), OLD)
+                    self.assertFalse(self.record.exists())
+                finally:
+                    os.killpg(child.pid, signal.SIGTERM); child.wait()
+
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux process inventory')
+    def test_relative_flagged_launcher(self):
+        script = self.wrapper.parent / 'proton'
+        script.write_text('import time; time.sleep(30)')
+        child = subprocess.Popen([sys.executable, '-Es', 'tool/proton'], cwd=self.root)
+        try:
+            result = self.cli('apply', self.before, self.record)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertIn('in use', result.stderr)
+            self.assertEqual(self.wrapper.read_bytes(), OLD)
+        finally:
+            child.terminate(); child.wait()
+
+    @unittest.skipUnless(Path('/proc').is_dir(), 'Linux process inventory')
+    def test_interpreter_data_args_are_not_tool_scripts(self):
+        outside = self.root / 'outside.py'
+        outside.write_text('import time; time.sleep(30)')
+        # The absolute tool path is data, a -W/-X parameter or a -m argument,
+        # not the executing script. It must not create a false tool owner.
+        module = self.root / 'outside_module.py'
+        module.write_text('import time; time.sleep(30)')
+        data = str(self.wrapper.parent / 'data')
+        cases = ([sys.executable, '-Es', str(outside), data],
+                 [sys.executable, '-W', data, '-X', data, str(outside)],
+                 [sys.executable, '-c', 'import time; time.sleep(30)', data],
+                 [sys.executable, '-m', 'outside_module', data],
+                 ['bash', '-c', 'sleep 30; :', 'name', data])
+        for args in cases:
+            with self.subTest(args=args):
+                child = subprocess.Popen(args, cwd=self.root, stderr=subprocess.DEVNULL, start_new_session=True)
+                try:
+                    self.assertNotIn(child.pid, routing.active_tool_processes(self.wrapper.parent))
+                finally:
+                    os.killpg(child.pid, signal.SIGTERM); child.wait()
 
     def test_artifact_audit(self):
         artifact = self.wrapper.parent / 'files' / 'ntdll.so'

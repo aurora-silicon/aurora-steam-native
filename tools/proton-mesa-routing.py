@@ -121,6 +121,63 @@ def transform(data, retired):
     return result, changes
 
 
+def interpreter_script(argv, executable, cwd):
+    """Return the actual script for supported Python/POSIX-shell argv forms.
+
+    Recognize common short flags, Python -W/-X and shell -o/-O arguments.
+    Code/module/stdin modes and unknown options have no assumed script; later
+    data arguments are never scanned as if they were a launcher path.
+    """
+    python = re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", executable.name)
+    shell = executable.name in ("sh", "bash", "dash", "ksh", "zsh")
+    if not python and not shell:
+        return None
+    words = [os.fsdecode(a) for a in argv]
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word == "--":
+            i += 1
+            break
+        if word == "-":
+            return None
+        if not word.startswith("-") and not (shell and word.startswith("+")):
+            break
+        if python and word.startswith("--"):
+            if word == "--check-hash-based-pycs":
+                i += 2
+                continue
+            if word.startswith("--check-hash-based-pycs="):
+                i += 1
+                continue
+            return None
+        if shell and word.startswith("--"):
+            if word in ("--noprofile", "--norc", "--posix", "--restricted", "--verbose", "--login"):
+                i += 1
+                continue
+            if word in ("--rcfile", "--init-file"):
+                i += 2
+                continue
+            return None
+        flags = word[1:]
+        allowed = "bBdEhiIOPqRsStuvx" if python else "abBCDefhHiklmnpPrtuvx"
+        params = "WX" if python else "oO"
+        for at, flag in enumerate(flags):
+            if flag in ("cm" if python else "cs"):
+                return None
+            if flag in params:
+                if at + 1 == len(flags):
+                    i += 1   # a separate option parameter
+                break
+            if flag not in allowed:
+                return None
+        i += 1
+    if i >= len(words) or words[i] == "-":
+        return None
+    script = Path(words[i])
+    return script if script.is_absolute() else cwd / script
+
+
 def active_tool_processes(tool):
     found = []
     for p in Path("/proc").glob("[0-9]*"):
@@ -130,8 +187,16 @@ def active_tool_processes(tool):
             paths = [Path(os.readlink(p / k)) for k in ("exe", "cwd")]
             comm = (p / "comm").read_text().strip()
             argv = (p / "cmdline").read_bytes().split(b"\0")
-            selected = argv if comm.startswith(("wine", "FEX", "proton", "reaper")) else argv[:2]
-            paths += [Path(a.decode(errors="replace")) for a in selected if a.startswith(b"/")]
+            executable, cwd = paths
+            is_interpreter = (re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", executable.name)
+                              or executable.name in ("sh", "bash", "dash", "ksh", "zsh"))
+            if is_interpreter:
+                script = interpreter_script(argv, executable, cwd)
+                if script is not None:
+                    paths.append(script)
+            else:
+                selected = argv if comm.startswith(("wine", "FEX", "proton", "reaper")) else argv[:2]
+                paths += [Path(a.decode(errors="replace")) for a in selected if a.startswith(b"/")]
             paths = [x.resolve(strict=False) for x in paths]
             if any(x == tool or tool in x.parents for x in paths):
                 found.append(int(p.name))
