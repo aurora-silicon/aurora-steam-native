@@ -1,3 +1,15 @@
+From: Ryan Murray <ryan@aurorasilicon.org>
+Subject: [PATCH] ntdll: guard FEX predicate writes by the SVE record extent
+
+License: LGPL-2.1-or-later, matching dlls/ntdll/unix/signal_arm64.c.
+That file carries Copyright 2010-2013 André Hentschel.
+
+Only initialize FEX predicates when the signal record contains valid vector
+state. Header-only records must remain untouched.
+
+Assisted-by: LLM
+Signed-off-by: Ryan Murray <ryan@aurorasilicon.org>
+
 --- a/dlls/ntdll/unix/signal_arm64.c
 +++ b/dlls/ntdll/unix/signal_arm64.c
 @@ -1485,12 +1485,18 @@

@@ -57,5 +57,7 @@ implement SME without SVE.
 
 ## Licence
 
-MIT, see the SPDX headers. Steam, Proton and their components are the
-property of their respective owners and are not distributed here.
+The launcher, installer and documentation are MIT (`LICENSES/MIT.txt`).
+The patch to Wine is LGPL-2.1-or-later, matching the Wine source file
+(`LICENSES/LGPL-2.1-or-later.txt`). Steam, Proton and their components are
+the property of their respective owners and are not distributed here.
