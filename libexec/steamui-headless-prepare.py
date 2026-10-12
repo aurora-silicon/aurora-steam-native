@@ -11,6 +11,19 @@ def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def module(name,path):
     spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
 
+def postcheck(receipt,name,check):
+    try:receipt[name]=check()
+    except BaseException as error:
+        receipt[name]=False;receipt[name+'_error']=type(error).__name__;receipt['pass']=False
+
+def save_receipt(path,receipt):
+    temporary=path.with_suffix('.tmp')
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as out:
+        json.dump(receipt,out,indent=2);out.write('\n');out.flush();os.fsync(out.fileno())
+    temporary.replace(path)
+    directory=os.open(path.parent,os.O_DIRECTORY);os.fsync(directory);os.close(directory)
+
 def stage(path,expected):
     if digest(path)!=expected:raise RuntimeError('helper archive hash drift')
     if KIT.exists() or KIT.is_symlink():raise RuntimeError('kit exists; no overwrite/restart')
@@ -71,7 +84,7 @@ def execute(args):
         state=subprocess.run(USER+['systemctl','--user','show',unit,'--property=LoadState','--value'],capture_output=True,text=True,timeout=10).stdout.strip()
         if state!='not-found':raise RuntimeError('unit already exists')
         receipt['launch_attempted']=True;receipt['ownership_token_sha256']=hashlib.sha256(token.encode()).hexdigest()
-        initial=evidence/'receipt.json';initial.write_text(json.dumps(receipt,indent=2)+'\n');initial.chmod(0o600)
+        save_receipt(evidence/'receipt.json',receipt)
         started=True
         command(USER+['systemd-run','--user','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)])
         deadline=time.monotonic()+12
@@ -99,7 +112,7 @@ def execute(args):
         if gate.reason(*after):raise RuntimeError('post-preparation resource gate failed')
         receipt['pass']=True
     except BaseException as error:
-        receipt['error']=type(error).__name__+': '+str(error)
+        receipt['error']=type(error).__name__;receipt['error_rc']=getattr(error,'returncode',None)
     finally:
         if client is not None and client.poll() is None:
             try:client.wait(timeout=15)
@@ -128,22 +141,17 @@ def execute(args):
                     time.sleep(.1)
                 if not receipt['normal_exit']:raise RuntimeError('owned unit/descendants remain; no forced stop or launch retry')
             except BaseException as error:receipt['cleanup_error']=str(error);receipt['pass']=False
-        def postcheck(name,check):
-            try:receipt[name]=check()
-            except BaseException as error:receipt[name]=False;receipt[name+'_error']=type(error).__name__+': '+str(error);receipt['pass']=False
-        postcheck('protective_services_active',lambda:all(command(['systemctl','is-active',service])=='active' for service in ('speakerguardd.service','aurora-sep.service')))
-        for service in ('speakerguardd.service','aurora-sep.service'):command(['systemctl','is-active',service])
-        receipt['protective_services_active']=True
-        postcheck('physical_state_unchanged',lambda:display()==before_display)
-        postcheck('taint_unchanged',lambda:Path('/proc/sys/kernel/tainted').read_text()==before_taint)
+        postcheck(receipt,'protective_services_active',lambda:all(command(['systemctl','is-active',service])=='active' for service in ('speakerguardd.service','aurora-sep.service')))
+        postcheck(receipt,'physical_state_unchanged',lambda:display()==before_display)
+        postcheck(receipt,'taint_unchanged',lambda:Path('/proc/sys/kernel/tainted').read_text()==before_taint)
         def kernel_check():
             journal=command(['journalctl','-k','--after-cursor='+cursor,'--no-pager']);log=evidence/'kernel.private.log';log.write_text(journal);log.chmod(0o600)
             errors=[line for line in journal.splitlines() if re.search(r'BUG:|WARNING:|Oops|Call Trace|(?:asahi|apple-dcp|drm).*?(?:fault|error|timeout|failed)',line,re.I)]
             receipt['matching_new_kernel_errors']=len(errors)
             return not errors
-        postcheck('kernel_errors_absent',kernel_check)
+        postcheck(receipt,'kernel_errors_absent',kernel_check)
         if not all(receipt.get(k) for k in ('normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent')):receipt['pass']=False
-        out=evidence/'receipt.json';out.write_text(json.dumps(receipt,indent=2)+'\n');out.chmod(0o600)
+        save_receipt(evidence/'receipt.json',receipt)
     print(json.dumps(receipt,sort_keys=True))
     return 0 if receipt['pass'] else 2
 if __name__=='__main__':
