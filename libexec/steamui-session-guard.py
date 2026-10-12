@@ -6,6 +6,8 @@ import json
 import os
 import re
 import stat
+import socket
+import struct
 import subprocess
 from pathlib import Path
 
@@ -38,13 +40,29 @@ def owned_socket(path, pid, proc, uid):
             bound = True
     if not bound:
         raise RuntimeError("display socket is not bound by the owned compositor")
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise RuntimeError("live socket peer verification unsupported")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(2)
+        client.connect(str(path))
+        peer_pid, peer_uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        if peer_pid != int(pid) or peer_uid != uid:
+            raise RuntimeError("reachable socket peer is not the owned compositor")
 
 def headless(profile, proc=Path("/proc"), uid=UID):
-    p = Path(profile)
-    st = p.lstat()
+    fd = os.open(profile, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return headless_fd(fd, proc, uid)
+    finally:
+        os.close(fd)
+
+def headless_fd(fd, proc=Path("/proc"), uid=UID):
+    st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_mode & 0o077:
         raise RuntimeError("headless profile must be private and owned by the test user")
-    j = json.loads(p.read_text())
+    os.lseek(fd, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(fd), "r") as source:
+        j = json.load(source)
     if j["boot_id"] != (proc / "sys/kernel/random/boot_id").read_text().strip():
         raise RuntimeError("stale headless boot identity")
     token = j.get("ownership_token", "")

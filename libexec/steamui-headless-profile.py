@@ -6,7 +6,8 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
+import stat
+import secrets
 
 spec = importlib.util.spec_from_file_location("guard", Path(__file__).with_name("steamui-session-guard.py"))
 guard = importlib.util.module_from_spec(spec)
@@ -16,8 +17,6 @@ def create(path):
     if os.getuid() != guard.UID:
         raise RuntimeError("profile must be created by the legitimate test user")
     path = Path(path)
-    if path.parent.is_symlink() or path.parent.stat().st_uid != guard.UID or path.parent.stat().st_mode & 0o077:
-        raise RuntimeError("headless profile directory must be private and user-owned")
     token = os.environ.get("AURORA_HEADLESS_TOKEN", "")
     pid = os.getppid()
     for _ in range(16):
@@ -42,19 +41,31 @@ def create(path):
     j.update(ownership_token=token, runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""), boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              sway_pid=pid, sway_start=p["start"], xwayland_pid=child_pid, xwayland_start=child["start"],
              XDG_SESSION_TYPE="wayland", XDG_CURRENT_DESKTOP="sway")
-    fd, temporary = tempfile.mkstemp(prefix=".headless-profile-", dir=path.parent)
+    publish(path, j)
+
+def publish(path, j):
+    path = Path(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    st = os.fstat(directory)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != guard.UID or st.st_mode & 0o077:
+        os.close(directory)
+        raise RuntimeError("headless profile directory must be private and user-owned")
+    temporary = ".headless-profile-" + secrets.token_hex(16)
+    fd = None
     try:
-        with os.fdopen(fd, "w") as out:
+        fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        with os.fdopen(os.dup(fd), "w") as out:
             json.dump(j, out); out.flush(); os.fsync(out.fileno())
-        guard.headless(temporary)
-        os.link(temporary, path, follow_symlinks=False)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        guard.headless_fd(fd)
+        os.link(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        os.fsync(directory)
+    finally:
         try:
-            os.fsync(directory)
+            if fd is not None:
+                os.close(fd)
+                os.unlink(temporary, dir_fd=directory)
         finally:
             os.close(directory)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
