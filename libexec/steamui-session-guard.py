@@ -20,19 +20,54 @@ def process(pid, proc=Path("/proc")):
     return {"uid": p.stat().st_uid, "comm": (p / "comm").read_text().strip(),
             "parent": int(fields[1]), "start": int(fields[19]),
             "argv": (p / "cmdline").read_bytes().split(b"\0"),
+            "cgroups": (p / "cgroup").read_text().splitlines(),
             "env": dict(v.split(b"=", 1) for v in (p / "environ").read_bytes().split(b"\0") if b"=" in v)}
+
+def unit_group(process, unit):
+    if not re.fullmatch(r"aurora-steamui-headless-[0-9a-f]{16}\.service", unit):
+        raise RuntimeError("dedicated headless unit missing")
+    groups = [line[3:] for line in process["cgroups"] if line.startswith("0::")]
+    if len(groups) != 1 or Path(groups[0]).name != unit:
+        raise RuntimeError("process is not in the dedicated headless unit")
+    return groups[0]
+
+def socket_inodes(pid, proc):
+    inodes = set()
+    for fd in (proc / str(pid) / "fd").iterdir():
+        match = re.fullmatch(r"socket:\[(\d+)\]", os.readlink(fd))
+        if match:
+            inodes.add(match[1])
+    return inodes
+
+def xwayland_listeners(xwayland, xpid, sway_pid, display, proc):
+    argv = xwayland["argv"]
+    listeners = []
+    for index, arg in enumerate(argv):
+        if arg in (b"-listenfd", b"-listen"):
+            if index + 1 >= len(argv) or not argv[index + 1].isdigit():
+                raise RuntimeError("invalid Xwayland inherited listener")
+            link = os.readlink(proc / str(xpid) / "fd" / argv[index + 1].decode())
+            match = re.fullmatch(r"socket:\[(\d+)\]", link)
+            if not match:
+                raise RuntimeError("Xwayland listener is not a socket")
+            listeners.append(match[1])
+    if len(listeners) != 2 or len(set(listeners)) != 2 or not set(listeners) <= socket_inodes(sway_pid, proc):
+        raise RuntimeError("Xwayland listeners are not inherited from owned compositor")
+    path = "/tmp/.X11-unix/X" + display[1:].split(".", 1)[0]
+    bound = set()
+    for line in (proc / "net/unix").read_text().splitlines()[1:]:
+        fields = line.split(maxsplit=7)
+        if len(fields) == 8 and fields[6] in listeners and fields[7] in (path, "@" + path):
+            bound.add(fields[6])
+    if bound != set(listeners):
+        raise RuntimeError("Xwayland inherited listener display mismatch")
 
 def owned_socket(path, pid, proc, uid):
     path = Path(path)
     st = path.lstat()
     if not stat.S_ISSOCK(st.st_mode) or st.st_uid != uid:
         raise RuntimeError("owned headless socket absent")
-    inodes = set()
-    for fd in (proc / str(pid) / "fd").iterdir():
-        link = os.readlink(fd)
-        match = re.fullmatch(r"socket:\[(\d+)\]", link)
-        if match:
-            inodes.add(match[1])
+    inodes = socket_inodes(pid, proc)
     bound = False
     for line in (proc / "net/unix").read_text().splitlines()[1:]:
         fields = line.split(maxsplit=7)
@@ -73,6 +108,7 @@ def headless_fd(fd, proc=Path("/proc"), uid=UID):
         raise RuntimeError("headless compositor identity changed")
     if sway["env"].get(b"WLR_BACKENDS") != b"headless" or sway["env"].get(b"AURORA_HEADLESS_TOKEN") != token.encode():
         raise RuntimeError("compositor is not this owned headless test")
+    group = unit_group(sway, j["owned_unit"])
     runtime = Path(j["runtime_dir"])
     if runtime.is_symlink() or runtime.stat().st_uid != uid or runtime.stat().st_mode & 0o077:
         raise RuntimeError("headless runtime directory ownership mismatch")
@@ -85,11 +121,14 @@ def headless_fd(fd, proc=Path("/proc"), uid=UID):
     owned_socket(runtime / j["WAYLAND_DISPLAY"], j["sway_pid"], proc, uid)
     xwayland = process(j["xwayland_pid"], proc)
     if (xwayland["uid"] != uid or xwayland["comm"] != "Xwayland" or
-            xwayland["parent"] != int(j["sway_pid"]) or xwayland["start"] != j["xwayland_start"] or
+            xwayland["start"] != j["xwayland_start"] or
+            unit_group(xwayland, j["owned_unit"]) != group or
+            xwayland["env"].get(b"AURORA_HEADLESS_TOKEN") != token.encode() or
             len(xwayland["argv"]) < 2 or xwayland["argv"][1] != j["DISPLAY"].encode()):
         raise RuntimeError("DISPLAY is not the owned headless Xwayland")
     if not re.fullmatch(r":[0-9]+(?:\.[0-9]+)?", j["DISPLAY"]):
         raise RuntimeError("headless display environment incomplete")
+    xwayland_listeners(xwayland, j["xwayland_pid"], j["sway_pid"], j["DISPLAY"], proc)
     authority = j.get("XAUTHORITY", "")
     if authority:
         argv = xwayland["argv"]

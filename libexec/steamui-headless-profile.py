@@ -26,19 +26,21 @@ def create(path):
         pid = p["parent"]
     else:
         raise RuntimeError("no owned compositor ancestor")
+    unit = os.environ.get("AURORA_HEADLESS_UNIT", "")
+    group = guard.unit_group(p, unit)
     children = []
     for child in Path("/proc").glob("[0-9]*"):
         try:
             c = guard.process(child.name)
-            if c["uid"] == guard.UID and c["comm"] == "Xwayland" and c["parent"] == pid and os.environ.get("DISPLAY", "").encode() in c["argv"]:
+            if c["uid"] == guard.UID and c["comm"] == "Xwayland" and guard.unit_group(c, unit) == group and c["env"].get(b"AURORA_HEADLESS_TOKEN") == token.encode() and len(c["argv"]) > 1 and c["argv"][1] == os.environ.get("DISPLAY", "").encode():
                 children.append((int(child.name), c))
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError, RuntimeError):
             continue
     if len(children) != 1:
         raise RuntimeError("headless Xwayland absent or ambiguous; no physical fallback")
     child_pid, child = children[0]
     j = {k: os.environ.get(k, "") for k in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "SWAYSOCK")}
-    j.update(ownership_token=token, runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""), boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+    j.update(ownership_token=token, owned_unit=unit, runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""), boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
              sway_pid=pid, sway_start=p["start"], xwayland_pid=child_pid, xwayland_start=child["start"],
              XDG_SESSION_TYPE="wayland", XDG_CURRENT_DESKTOP="sway")
     publish(path, j)
