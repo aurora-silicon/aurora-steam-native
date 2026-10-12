@@ -60,17 +60,21 @@ def execute(args):
     env={'PATH':'/usr/bin:/bin','HOME':'/home/user','XDG_RUNTIME_DIR':'/run/user/1000','DBUS_SESSION_BUS_ADDRESS':'unix:path=/run/user/1000/bus','WLR_BACKENDS':'headless','WLR_HEADLESS_OUTPUTS':'1','WLR_RENDERER':'gles2','MESA_LOADER_DRIVER_OVERRIDE':'zink','GALLIUM_DRIVER':'zink','LIBGL_KOPPER_DISABLE':'true','WLR_XWAYLAND':'/usr/bin/Xwayland','AURORA_HEADLESS_TOKEN':token,'AURORA_HEADLESS_UNIT':unit}
     receipt={'unit':unit,'pattern_unit':pattern,'profile':str(profile),'evidence':str(evidence),'kit_sha256':args.kit_sha,'boot_id':args.boot_id,'resource_before':values,'qualification_scope':'owned isolated preparation/capture; no Steam/GPU conformance/physical display grade','pass':False,'normal_exit':False}
     started=False;identity=None;client=None
-    def pid():
-        result=subprocess.run(USER+['systemctl','--user','show',unit,'--property=MainPID','--value'],capture_output=True,text=True,timeout=10)
-        if result.returncode==0:return int(result.stdout.strip() or '0')
-        state=subprocess.run(USER+['systemctl','--user','show',unit,'--property=LoadState','--value'],capture_output=True,text=True,timeout=10)
-        if state.stdout.strip()=='not-found':return 0
-        raise RuntimeError('cannot verify owned unit state')
+    def unit_state():
+        result=subprocess.run(USER+['systemctl','--user','show',unit,'--property=LoadState','--property=ActiveState','--property=MainPID','--property=Job'],capture_output=True,text=True,timeout=10)
+        state=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if result.returncode and state.get('LoadState')!='not-found':raise RuntimeError('cannot verify owned unit state')
+        if state.get('LoadState')=='not-found':return dict(LoadState='not-found',ActiveState='inactive',MainPID='0',Job='')
+        if any(k not in state for k in ('LoadState','ActiveState','MainPID','Job')):raise RuntimeError('incomplete owned unit state')
+        return state
     try:
         state=subprocess.run(USER+['systemctl','--user','show',unit,'--property=LoadState','--value'],capture_output=True,text=True,timeout=10).stdout.strip()
         if state!='not-found':raise RuntimeError('unit already exists')
+        receipt['launch_attempted']=True;receipt['ownership_token_sha256']=hashlib.sha256(token.encode()).hexdigest()
+        initial=evidence/'receipt.json';initial.write_text(json.dumps(receipt,indent=2)+'\n');initial.chmod(0o600)
+        started=True
         command(USER+['systemd-run','--user','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)])
-        started=True;deadline=time.monotonic()+12
+        deadline=time.monotonic()+12
         while not profile.exists() and time.monotonic()<deadline:time.sleep(.1)
         j=guard.headless(profile);identity=(j['sway_pid'],j['sway_start'])
         receipt['sway_pid'],receipt['sway_start']=identity;receipt['xwayland_pid']=j['xwayland_pid'];receipt['profile_guard_pass']=True
@@ -102,31 +106,43 @@ def execute(args):
             except subprocess.TimeoutExpired:receipt['pattern_still_live']=True;receipt['pass']=False
         if started:
             try:
-                main=pid()
-                if main:
-                    p=guard.process(main)
-                    if p['uid']!=UID or p['comm']!='sway' or p['env'].get(b'AURORA_HEADLESS_TOKEN')!=token.encode() or guard.unit_group(p,unit) is None or (identity and (main,p['start'])!=identity):raise RuntimeError('cleanup compositor identity changed')
-                    ipc=Path('/run/user/1000')/f'sway-ipc.{UID}.{main}.sock';guard.owned_socket(ipc,main,Path('/proc'),UID)
-                    command(USER+['swaymsg','-s',str(ipc),'exit'])
-                deadline=time.monotonic()+10
+                deadline=time.monotonic()+15;exit_sent=False
                 while time.monotonic()<deadline:
+                    state=unit_state();main=int(state['MainPID'])
+                    if main and not exit_sent:
+                        p=guard.process(main)
+                        if p['uid']!=UID or p['comm']!='sway' or p['env'].get(b'AURORA_HEADLESS_TOKEN')!=token.encode() or guard.unit_group(p,unit) is None or (identity and (main,p['start'])!=identity):raise RuntimeError('cleanup compositor identity changed')
+                        ipc=Path('/run/user/1000')/f'sway-ipc.{UID}.{main}.sock'
+                        try:
+                            guard.owned_socket(ipc,main,Path('/proc'),UID)
+                            command(USER+['swaymsg','-s',str(ipc),'exit']);exit_sent=True
+                        except (FileNotFoundError,ConnectionRefusedError):pass
+                        except subprocess.CalledProcessError:receipt['exit_reply_ambiguous']=True
                     live=[]
                     for process in Path('/proc').glob('[0-9]*'):
                         try:
                             if any(line.startswith('0::') and Path(line[3:]).name in (unit,pattern) for line in (process/'cgroup').read_text().splitlines()):live.append(int(process.name))
                         except (FileNotFoundError,ProcessLookupError):pass
-                    if not live:receipt['normal_exit']=True;break
+                    if not live and (state['LoadState']=='not-found' or state['ActiveState'] in ('inactive','failed') and state['Job'] in ('','0')):
+                        receipt['normal_exit']=True;break
                     time.sleep(.1)
-                if not receipt['normal_exit']:raise RuntimeError('owned descendants remain; no forced stop')
+                if not receipt['normal_exit']:raise RuntimeError('owned unit/descendants remain; no forced stop or launch retry')
             except BaseException as error:receipt['cleanup_error']=str(error);receipt['pass']=False
+        def postcheck(name,check):
+            try:receipt[name]=check()
+            except BaseException as error:receipt[name]=False;receipt[name+'_error']=type(error).__name__+': '+str(error);receipt['pass']=False
+        postcheck('protective_services_active',lambda:all(command(['systemctl','is-active',service])=='active' for service in ('speakerguardd.service','aurora-sep.service')))
         for service in ('speakerguardd.service','aurora-sep.service'):command(['systemctl','is-active',service])
         receipt['protective_services_active']=True
-        receipt['physical_state_unchanged']=display()==before_display
-        receipt['taint_unchanged']=Path('/proc/sys/kernel/tainted').read_text()==before_taint
-        journal=command(['journalctl','-k','--after-cursor='+cursor,'--no-pager']);(evidence/'kernel.private.log').write_text(journal);(evidence/'kernel.private.log').chmod(0o600)
-        errors=[line for line in journal.splitlines() if re.search(r'BUG:|WARNING:|Oops|Call Trace|(?:asahi|apple-dcp|drm).*?(?:fault|error|timeout|failed)',line,re.I)]
-        receipt['matching_new_kernel_errors']=len(errors)
-        if not receipt['normal_exit'] or not receipt['physical_state_unchanged'] or not receipt['taint_unchanged'] or errors:receipt['pass']=False
+        postcheck('physical_state_unchanged',lambda:display()==before_display)
+        postcheck('taint_unchanged',lambda:Path('/proc/sys/kernel/tainted').read_text()==before_taint)
+        def kernel_check():
+            journal=command(['journalctl','-k','--after-cursor='+cursor,'--no-pager']);log=evidence/'kernel.private.log';log.write_text(journal);log.chmod(0o600)
+            errors=[line for line in journal.splitlines() if re.search(r'BUG:|WARNING:|Oops|Call Trace|(?:asahi|apple-dcp|drm).*?(?:fault|error|timeout|failed)',line,re.I)]
+            receipt['matching_new_kernel_errors']=len(errors)
+            return not errors
+        postcheck('kernel_errors_absent',kernel_check)
+        if not all(receipt.get(k) for k in ('normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent')):receipt['pass']=False
         out=evidence/'receipt.json';out.write_text(json.dumps(receipt,indent=2)+'\n');out.chmod(0o600)
     print(json.dumps(receipt,sort_keys=True))
     return 0 if receipt['pass'] else 2
