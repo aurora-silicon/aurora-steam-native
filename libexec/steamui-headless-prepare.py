@@ -24,11 +24,13 @@ def save_receipt(path,receipt):
     temporary.replace(path)
     directory=os.open(path.parent,os.O_DIRECTORY);os.fsync(directory);os.close(directory)
 
-CANDIDATE_CODE="import json,os,sys; os.umask(0o077); keys=('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','SWAYSOCK','AURORA_HEADLESS_UNIT','AURORA_HEADLESS_TOKEN'); fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); out=os.fdopen(fd,'w'); json.dump({k:os.environ.get(k,'') for k in keys},out); out.flush(); os.fsync(out.fileno()); out.close()"
+CANDIDATE_CODE="import json,os,sys; os.umask(0o077); keys=('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','SWAYSOCK','AURORA_HEADLESS_UNIT','AURORA_HEADLESS_TOKEN'); temporary=sys.argv[1]+'.tmp'; fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); out=os.fdopen(fd,'w'); json.dump({k:os.environ.get(k,'') for k in keys},out); out.flush(); os.fsync(out.fileno()); out.close(); os.link(temporary,sys.argv[1],follow_symlinks=False); os.unlink(temporary)"
 def startup_config(profile):
     if not re.fullmatch(r'/var/tmp/steamui/headless-[0-9a-f]{16}/env.json',str(profile)):raise RuntimeError('unexpected profile path')
     candidate=profile.with_name('candidate.json')
     return 'xwayland force\noutput * resolution 1920x1080\nexec /usr/bin/python3 -I -c '+shlex.quote(CANDIDATE_CODE)+' '+shlex.quote(str(candidate))+'\n'
+
+class ProfileNotReady(RuntimeError):pass
 
 def broker_profile(profile,unit,token,sway_pid,guard):
     candidate=profile.with_name('candidate.json')
@@ -43,10 +45,12 @@ def broker_profile(profile,unit,token,sway_pid,guard):
     children=[]
     for proc in Path('/proc').glob('[0-9]*'):
         try:
+            if (proc/'comm').read_text().strip()!='Xwayland' or not any(line.startswith('0::') and Path(line[3:]).name==unit for line in (proc/'cgroup').read_text().splitlines()):continue
             child=guard.process(proc.name)
             if child['uid']==UID and child['comm']=='Xwayland' and guard.unit_group(child,unit)==group and child['env'].get(b'AURORA_HEADLESS_TOKEN')==token.encode() and len(child['argv'])>1 and child['argv'][1]==j['DISPLAY'].encode():children.append((int(proc.name),child))
         except (OSError,ValueError,IndexError,RuntimeError):pass
-    if len(children)!=1:raise RuntimeError('owned Xwayland absent or ambiguous')
+    if not children:raise ProfileNotReady('owned Xwayland not ready')
+    if len(children)!=1:raise RuntimeError('owned Xwayland ambiguous')
     xpid,child=children[0]
     result={key:j.get(key,'') for key in ('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','SWAYSOCK')}
     result.update(boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),ownership_token=token,owned_unit=unit,runtime_dir='/run/user/1000',sway_pid=sway_pid,sway_start=sway['start'],xwayland_pid=xpid,xwayland_start=child['start'],XDG_SESSION_TYPE='wayland',XDG_CURRENT_DESKTOP='sway')
@@ -151,7 +155,13 @@ def execute(args):
         deadline=time.monotonic()+12
         candidate=private/'candidate.json'
         while not candidate.exists() and time.monotonic()<deadline:time.sleep(.1)
-        state=unit_state();j=broker_profile(profile,unit,token,int(state['MainPID']),guard);identity=(j['sway_pid'],j['sway_start'])
+        while True:
+            state=unit_state()
+            try:j=broker_profile(profile,unit,token,int(state['MainPID']),guard);break
+            except ProfileNotReady:
+                if time.monotonic()>=deadline:raise
+                time.sleep(.1)
+        identity=(j['sway_pid'],j['sway_start'])
         receipt['sway_pid'],receipt['sway_start']=identity;receipt['xwayland_pid']=j['xwayland_pid'];receipt['profile_guard_pass']=True
         maps=Path('/proc',str(identity[0]),'maps').read_text()
         libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or 'libvulkan_asahi' in line)))
