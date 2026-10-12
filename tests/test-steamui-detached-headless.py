@@ -2,6 +2,7 @@
 """CPU bookkeeping/routing only; no real compositor or process launch."""
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -21,6 +22,12 @@ class HeadlessAdmission(unittest.TestCase):
         for key in ['headless_profile_sha256','session_guard_sha256']:
             with self.subTest(key=key),patch.object(job,'digest',return_value='guard'),patch.object(job,'headless_identity',return_value=dict(identity,**{key:'changed'})):
                 with self.assertRaises(RuntimeError):job.runner_environment(receipt)
+    def test_explicit_empty_profile_never_selects_physical(self):
+        with self.assertRaises(RuntimeError):
+            job._launch(SimpleNamespace(arms='A C',headless_profile=''))
+        with patch.object(job,'digest',return_value='guard'),self.assertRaises(RuntimeError):
+            job.runner_environment(dict(arms='A C',owner_record='owned',headless_profile='',session_guard_sha256='guard'))
+
     def test_invalid_or_stale_identity_never_falls_back(self):
         for path in ['/run/user/1000/env.json','/var/tmp/steamui/headless-x/env.json','/var/tmp/steamui/headless-'+'a'*16+'/../env.json']:
             with self.subTest(path=path),self.assertRaises(RuntimeError):job.headless_identity(path)

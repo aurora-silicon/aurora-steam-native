@@ -98,7 +98,7 @@ def headless_identity(path):
  return {'headless_profile':str(profile),'headless_profile_sha256':sha,'session_guard_sha256':digest(guard_path)}
 def runner_environment(j):
  env={'PATH':'/usr/bin:/bin','HOME':'/root','STEAMUI_ARMS':j['arms'],'STEAMUI_OWNER_RECORD_PRESET':j['owner_record']}
- if j.get('headless_profile'):
+ if 'headless_profile' in j:
   if digest(KIT/'session-guard.py')!=j.get('session_guard_sha256'):raise RuntimeError('headless guard source drift')
   identity=headless_identity(j['headless_profile'])
   if any(identity[key]!=j.get(key) for key in identity):raise RuntimeError('headless profile/guard identity drift')
@@ -118,7 +118,7 @@ def launch(args):
  print(json.dumps(result))
 def _launch(args):
  if args.arms not in ('A C','C'):raise RuntimeError('unsupported campaign scope')
- identity=headless_identity(args.headless_profile) if args.headless_profile else {}
+ identity=headless_identity(args.headless_profile) if args.headless_profile is not None else {}
  script=pathlib.Path(__file__).resolve();job=pathlib.Path('/var/tmp/steamui-full-job-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8]);job.mkdir(mode=0o700)
  stamp=time.strftime('%Y%m%d-%H%M%S');preset='/var/tmp/steamui-owner-'+stamp+'-'+uuid.uuid4().hex[:8]+'.json'
  j={'job_dir':str(job),'boot_id':boot(),'runner_script_sha256':digest(script),'owner_record':preset,'arms':args.arms,'plan':args.plan,'plan_sha':args.plan_sha,'audit':args.audit,'audit_sha':args.audit_sha,'kit_outer_sha256':digest(KIT/'ui-public-scoped.sh'),'launched_t':time.time()}
