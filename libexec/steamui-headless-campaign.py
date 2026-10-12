@@ -34,7 +34,14 @@ def ui_work(args,prepare,operator):
         job=Path(lines[0]['job_dir']);receipt['ui_job']=str(job);prepare.save_receipt(evidence/'receipt.json',receipt)
         deadline=time.monotonic()+1500;stop_sent=False;timed_out=False
         while True:
-            state=operator.status(job)
+            try:state=operator.status(job)
+            except (OSError,ValueError,RuntimeError) as error:
+                receipt['ui_observation_error']=type(error).__name__;prepare.save_receipt(evidence/'receipt.json',receipt)
+                if time.monotonic()>=deadline:
+                    if stop_sent:raise RuntimeError('same UI job observation remains unresolved; compositor retained')
+                    operator.stop(job);stop_sent=True;timed_out=True;deadline=time.monotonic()+150
+                time.sleep(2)
+                continue
             summary={k:state.get(k) for k in ('phase','runner_live','rc','arm','nav_completed','expected_nav','soak_elapsed_seconds','stop_requested','last_metrics')}
             prepare.save_receipt(evidence/'ui-status.json',summary)
             if restored_terminal(state):
