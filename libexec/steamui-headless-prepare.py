@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Bounded isolated compositor/profile/frame preparation; no Steam or seat changes."""
-import argparse,hashlib,importlib.util,json,os,re,secrets,stat,struct,subprocess,tarfile,time
+import argparse,hashlib,importlib.util,json,os,re,secrets,shutil,stat,struct,subprocess,tarfile,time
 from pathlib import Path
 BASE=Path('/var/tmp/steamui');KIT=BASE/'full-kit71h';UID=1000
 USER=['runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000','DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus']
@@ -9,7 +9,7 @@ def command(argv,timeout=15):
     return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=timeout).stdout.strip()
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def module(name,path):
-    spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);exec(compile(path.read_bytes(),str(path),'exec'),m.__dict__);return m
 
 def postcheck(receipt,name,check):
     try:receipt[name]=check()
@@ -45,6 +45,14 @@ def stage(path,expected,reuse=False):
             st=KIT.lstat()
             if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022:raise RuntimeError('existing kit metadata unsafe')
             if {p.name for p in KIT.iterdir()}-{'__pycache__'}!={Path(m.name).name for m in members}:raise RuntimeError('existing kit member set drift')
+            cache=KIT/'__pycache__'
+            if cache.exists() or cache.is_symlink():
+                st=cache.lstat()
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022:raise RuntimeError('unsafe generated cache directory')
+                for p in cache.iterdir():
+                    st=p.lstat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022 or st.st_nlink!=1 or not re.fullmatch(r'(?:gates|session-guard)\.cpython-[0-9]+(?:\.opt-[0-9]+)?\.pyc',p.name):raise RuntimeError('unsafe or unexpected generated cache entry')
+                shutil.rmtree(cache)
         else:KIT.mkdir(mode=0o755)
         for m in members:
             p=KIT/Path(m.name).name;data=tar.extractfile(m).read()
