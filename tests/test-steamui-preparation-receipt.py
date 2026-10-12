@@ -8,7 +8,7 @@ class Receipt(unittest.TestCase):
     def test_sway_shell_callback_reaches_writer(self):
         profile=Path('/var/tmp/steamui/headless-'+'a'*16+'/env.json')
         line=prepare.startup_config(profile).splitlines()[-1]
-        callback='/usr/bin/python3 /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)
+        callback='/usr/bin/python3 -I /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)
         command=line.removeprefix('exec ').replace(callback,'printf PROFILE_READY')
         result=subprocess.run(['/bin/sh','-c',command],capture_output=True,text=True,timeout=2)
         self.assertEqual(result.returncode,0);self.assertEqual(result.stdout,'PROFILE_READY')

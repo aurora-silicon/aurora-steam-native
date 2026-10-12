@@ -27,7 +27,7 @@ def save_receipt(path,receipt):
 def startup_config(profile):
     if not re.fullmatch(r'/var/tmp/steamui/headless-[0-9a-f]{16}/env.json',str(profile)):raise RuntimeError('unexpected profile path')
     attempts=' '.join(str(i) for i in range(1,21))
-    return 'xwayland force\noutput * resolution 1920x1080\nexec /bin/sh -c "for i in '+attempts+'; do /usr/bin/python3 /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)+' && exit 0; sleep 0.25; done; exit 1"\n'
+    return 'xwayland force\noutput * resolution 1920x1080\nexec /bin/sh -c "for i in '+attempts+'; do /usr/bin/python3 -I /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)+' && exit 0; sleep 0.25; done; exit 1"\n'
 
 def stage(path,expected,reuse=False):
     if digest(path)!=expected:raise RuntimeError('helper archive hash drift')
@@ -125,7 +125,7 @@ def execute(args):
         gui.update({k:j[k] for k in ('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY') if j.get(k)})
         args_env=['/usr/bin/env','-i',*[k+'='+v for k,v in gui.items()]]
         log=(evidence/'pattern.private.log').open('x');os.chmod(log.name,0o600)
-        client=subprocess.Popen(USER+['systemd-run','--user','--unit='+pattern,'--collect','--wait','--pipe','-p','LimitCORE=0','-p','KillMode=process',*args_env,'/usr/bin/python3','/var/tmp/aurora-output-gamma919.py','--connector','HEADLESS-1','--seconds','8','--pattern','moving'],stdout=log,stderr=log)
+        client=subprocess.Popen(USER+['systemd-run','--user','--unit='+pattern,'--collect','--wait','--pipe','-p','LimitCORE=0','-p','KillMode=process',*args_env,'/usr/bin/python3','-I','/var/tmp/aurora-output-gamma919.py','--connector','HEADLESS-1','--seconds','8','--pattern','moving'],stdout=log,stderr=log)
         time.sleep(2);guard.headless(profile)
         png=evidence/'frame.png';command(USER+[*args_env,'/usr/bin/grim','-o','HEADLESS-1',str(private/'frame.png')]);data=(private/'frame.png').read_bytes();png.write_bytes(data);png.chmod(0o600)
         if data[:8]!=b'\x89PNG\r\n\x1a\n' or struct.unpack('>II',data[16:24])!=(1920,1080):raise RuntimeError('capture dimensions/signature fail')
