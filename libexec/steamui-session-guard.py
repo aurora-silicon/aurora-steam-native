@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Select a verified owned headless display or an unlocked physical session."""
+import argparse
+import json
+import os
+import re
+import stat
+import subprocess
+from pathlib import Path
+
+UID = 1000
+KEYS = ("User", "Name", "Active", "Remote", "Type", "Seat", "LockedHint")
+
+def process(pid, proc=Path("/proc")):
+    p = proc / str(int(pid))
+    fields = (p / "stat").read_text().rsplit(")", 1)[1].split()
+    return {"uid": p.stat().st_uid, "comm": (p / "comm").read_text().strip(),
+            "parent": int(fields[1]), "start": int(fields[19]),
+            "argv": (p / "cmdline").read_bytes().split(b"\0"),
+            "env": dict(v.split(b"=", 1) for v in (p / "environ").read_bytes().split(b"\0") if b"=" in v)}
+
+def owned_socket(path, pid, proc, uid):
+    path = Path(path)
+    st = path.lstat()
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != uid:
+        raise RuntimeError("owned headless socket absent")
+    inodes = set()
+    for fd in (proc / str(pid) / "fd").iterdir():
+        link = os.readlink(fd)
+        match = re.fullmatch(r"socket:\[(\d+)\]", link)
+        if match:
+            inodes.add(match[1])
+    bound = False
+    for line in (proc / "net/unix").read_text().splitlines()[1:]:
+        fields = line.split(maxsplit=7)
+        if len(fields) == 8 and fields[6] in inodes and fields[7] == str(path):
+            bound = True
+    if not bound:
+        raise RuntimeError("display socket is not bound by the owned compositor")
+
+def headless(profile, proc=Path("/proc"), uid=UID):
+    p = Path(profile)
+    st = p.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_mode & 0o077:
+        raise RuntimeError("headless profile must be private and owned by the test user")
+    j = json.loads(p.read_text())
+    if j["boot_id"] != (proc / "sys/kernel/random/boot_id").read_text().strip():
+        raise RuntimeError("stale headless boot identity")
+    token = j.get("ownership_token", "")
+    if len(token) < 32 or not all(c in "0123456789abcdef" for c in token):
+        raise RuntimeError("headless ownership token missing")
+    sway = process(j["sway_pid"], proc)
+    if sway["uid"] != uid or sway["comm"] != "sway" or sway["start"] != j["sway_start"]:
+        raise RuntimeError("headless compositor identity changed")
+    if sway["env"].get(b"WLR_BACKENDS") != b"headless" or sway["env"].get(b"AURORA_HEADLESS_TOKEN") != token.encode():
+        raise RuntimeError("compositor is not this owned headless test")
+    runtime = Path(j["runtime_dir"])
+    if runtime.is_symlink() or runtime.stat().st_uid != uid or runtime.stat().st_mode & 0o077:
+        raise RuntimeError("headless runtime directory ownership mismatch")
+    socket = Path(j["SWAYSOCK"])
+    if socket.parent != runtime or socket.name != f"sway-ipc.{uid}.{int(j['sway_pid'])}.sock":
+        raise RuntimeError("headless IPC path mismatches owned compositor")
+    if not re.fullmatch(r"wayland-[0-9]+", j.get("WAYLAND_DISPLAY", "")):
+        raise RuntimeError("invalid headless Wayland display")
+    owned_socket(socket, j["sway_pid"], proc, uid)
+    owned_socket(runtime / j["WAYLAND_DISPLAY"], j["sway_pid"], proc, uid)
+    xwayland = process(j["xwayland_pid"], proc)
+    if (xwayland["uid"] != uid or xwayland["comm"] != "Xwayland" or
+            xwayland["parent"] != int(j["sway_pid"]) or xwayland["start"] != j["xwayland_start"] or
+            len(xwayland["argv"]) < 2 or xwayland["argv"][1] != j["DISPLAY"].encode()):
+        raise RuntimeError("DISPLAY is not the owned headless Xwayland")
+    if not re.fullmatch(r":[0-9]+(?:\.[0-9]+)?", j["DISPLAY"]):
+        raise RuntimeError("headless display environment incomplete")
+    authority = j.get("XAUTHORITY", "")
+    if authority:
+        argv = xwayland["argv"]
+        if b"-auth" not in argv or argv.index(b"-auth") + 1 >= len(argv) or argv[argv.index(b"-auth") + 1] != authority.encode():
+            raise RuntimeError("headless authority does not belong to its Xwayland")
+        st = Path(authority).lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+            raise RuntimeError("headless authority ownership mismatch")
+    # Re-read both process identities after inspection; never fall back to GNOME.
+    if process(j["sway_pid"], proc)["start"] != sway["start"] or process(j["xwayland_pid"], proc)["start"] != xwayland["start"]:
+        raise RuntimeError("headless process identity raced")
+    return j
+
+def inspect(sid):
+    args = ["loginctl", "show-session", sid] + [a for k in KEYS for a in ("-p", k)]
+    p = subprocess.run(args, capture_output=True, text=True, timeout=10, check=True)
+    return dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
+
+def validate(session):
+    if (session.get("User") != str(UID) or session.get("Name") != "user" or
+            session.get("Active") != "yes" or session.get("Remote") != "no" or
+            session.get("Type") not in ("wayland", "x11") or not session.get("Seat", "").startswith("seat") or
+            session.get("LockedHint", "").lower() not in ("no", "false")):
+        raise RuntimeError("physical session absent/ambiguous/locked; legitimate unlock required")
+
+def check():
+    profile = os.environ.get("STEAMUI_HEADLESS_ENV")
+    if profile:
+        return headless(profile)
+    sid = os.environ.get("STEAMUI_SESSION_ID")
+    if not sid:
+        raise RuntimeError("physical session identity missing")
+    validate(inspect(sid))
+    return None
+
+def select():
+    if os.environ.get("STEAMUI_HEADLESS_ENV"):
+        check()
+        return "headless"
+    sid = os.environ.get("STEAMUI_SESSION_ID")
+    if sid:
+        validate(inspect(sid))
+        return sid
+    p = subprocess.run(["loginctl", "list-sessions", "--no-legend"], capture_output=True, text=True, timeout=10, check=True)
+    matches = []
+    for line in p.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or fields[1:3] != [str(UID), "user"]:
+            continue
+        try:
+            validate(inspect(fields[0]))
+            matches.append(fields[0])
+        except RuntimeError:
+            pass
+    if len(matches) != 1:
+        raise RuntimeError("unlocked physical session missing or ambiguous")
+    return matches[0]
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--select", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.select:
+            print(select())
+        else:
+            check()
+    except (OSError, ValueError, KeyError, IndexError, RuntimeError, subprocess.SubprocessError) as error:
+        parser.exit(2, str(error) + "\n")
