@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Bounded isolated compositor/profile/frame preparation; no Steam or seat changes."""
-import argparse,hashlib,importlib.util,json,os,re,secrets,shutil,stat,struct,subprocess,tarfile,time
+import argparse,hashlib,importlib.util,json,os,re,secrets,shlex,shutil,stat,struct,subprocess,tarfile,time
 from pathlib import Path
 BASE=Path('/var/tmp/steamui');KIT=BASE/'full-kit71h';UID=1000
 USER=['runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000','DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus']
@@ -24,10 +24,45 @@ def save_receipt(path,receipt):
     temporary.replace(path)
     directory=os.open(path.parent,os.O_DIRECTORY);os.fsync(directory);os.close(directory)
 
+CANDIDATE_CODE="import json,os,sys; os.umask(0o077); keys=('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','SWAYSOCK','AURORA_HEADLESS_UNIT','AURORA_HEADLESS_TOKEN'); fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); out=os.fdopen(fd,'w'); json.dump({k:os.environ.get(k,'') for k in keys},out); out.flush(); os.fsync(out.fileno()); out.close()"
 def startup_config(profile):
     if not re.fullmatch(r'/var/tmp/steamui/headless-[0-9a-f]{16}/env.json',str(profile)):raise RuntimeError('unexpected profile path')
-    attempts=' '.join(str(i) for i in range(1,21))
-    return 'xwayland force\noutput * resolution 1920x1080\nexec /bin/sh -c "for i in '+attempts+'; do /usr/bin/python3 -I /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)+' && exit 0; sleep 0.25; done; exit 1"\n'
+    candidate=profile.with_name('candidate.json')
+    return 'xwayland force\noutput * resolution 1920x1080\nexec /usr/bin/python3 -I -c '+shlex.quote(CANDIDATE_CODE)+' '+shlex.quote(str(candidate))+'\n'
+
+def broker_profile(profile,unit,token,sway_pid,guard):
+    candidate=profile.with_name('candidate.json')
+    fd=os.open(candidate,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        st=os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid!=UID or st.st_mode&0o077:raise RuntimeError('candidate metadata unsafe')
+        with os.fdopen(os.dup(fd)) as source:j=json.load(source)
+    finally:os.close(fd)
+    if j.get('AURORA_HEADLESS_UNIT')!=unit or j.get('AURORA_HEADLESS_TOKEN')!=token:raise RuntimeError('candidate token/unit mismatch')
+    sway=guard.process(sway_pid);group=guard.unit_group(sway,unit)
+    children=[]
+    for proc in Path('/proc').glob('[0-9]*'):
+        try:
+            child=guard.process(proc.name)
+            if child['uid']==UID and child['comm']=='Xwayland' and guard.unit_group(child,unit)==group and child['env'].get(b'AURORA_HEADLESS_TOKEN')==token.encode() and len(child['argv'])>1 and child['argv'][1]==j['DISPLAY'].encode():children.append((int(proc.name),child))
+        except (OSError,ValueError,IndexError,RuntimeError):pass
+    if len(children)!=1:raise RuntimeError('owned Xwayland absent or ambiguous')
+    xpid,child=children[0]
+    result={key:j.get(key,'') for key in ('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY','SWAYSOCK')}
+    result.update(boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),ownership_token=token,owned_unit=unit,runtime_dir='/run/user/1000',sway_pid=sway_pid,sway_start=sway['start'],xwayland_pid=xpid,xwayland_start=child['start'],XDG_SESSION_TYPE='wayland',XDG_CURRENT_DESKTOP='sway')
+    directory=os.open(profile.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);temporary='.validated-'+secrets.token_hex(16);out=None
+    try:
+        st=os.fstat(directory)
+        if st.st_uid!=UID or st.st_mode&0o077:raise RuntimeError('candidate directory unsafe')
+        out=os.open(temporary,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+        with os.fdopen(os.dup(out),'w') as f:json.dump(result,f);f.flush();os.fsync(f.fileno())
+        os.fchown(out,UID,UID);guard.headless_fd(out)
+        os.link(temporary,profile.name,src_dir_fd=directory,dst_dir_fd=directory,follow_symlinks=False);os.fsync(directory)
+    finally:
+        try:
+            if out is not None:os.close(out);os.unlink(temporary,dir_fd=directory)
+        finally:os.close(directory)
+    return guard.headless(profile)
 
 def stage(path,expected,reuse=False):
     if digest(path)!=expected:raise RuntimeError('helper archive hash drift')
@@ -114,8 +149,9 @@ def execute(args):
         sender.communicate(timeout=15)
         if sender.returncode:raise RuntimeError('owned unit launch sender failed')
         deadline=time.monotonic()+12
-        while not profile.exists() and time.monotonic()<deadline:time.sleep(.1)
-        j=guard.headless(profile);identity=(j['sway_pid'],j['sway_start'])
+        candidate=private/'candidate.json'
+        while not candidate.exists() and time.monotonic()<deadline:time.sleep(.1)
+        state=unit_state();j=broker_profile(profile,unit,token,int(state['MainPID']),guard);identity=(j['sway_pid'],j['sway_start'])
         receipt['sway_pid'],receipt['sway_start']=identity;receipt['xwayland_pid']=j['xwayland_pid'];receipt['profile_guard_pass']=True
         maps=Path('/proc',str(identity[0]),'maps').read_text()
         libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or 'libvulkan_asahi' in line)))

@@ -5,14 +5,20 @@ from pathlib import Path
 spec=importlib.util.spec_from_file_location('prepare',Path(__file__).parents[1]/'libexec/steamui-headless-prepare.py')
 prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class Receipt(unittest.TestCase):
-    def test_sway_shell_callback_reaches_writer(self):
+    def test_sway_shell_callback_reaches_candidate_collector(self):
         profile=Path('/var/tmp/steamui/headless-'+'a'*16+'/env.json')
         line=prepare.startup_config(profile).splitlines()[-1]
-        callback='/usr/bin/python3 -I /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)
-        command=line.removeprefix('exec ').replace(callback,'printf PROFILE_READY')
-        result=subprocess.run(['/bin/sh','-c',command],capture_output=True,text=True,timeout=2)
-        self.assertEqual(result.returncode,0);self.assertEqual(result.stdout,'PROFILE_READY')
-
+        command=line.removeprefix('exec ')
+        import shlex
+        parsed=shlex.split(command)
+        self.assertEqual(parsed[:3],['/usr/bin/python3','-I','-c'])
+        self.assertEqual(parsed[3],prepare.CANDIDATE_CODE)
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/'candidate.json'
+            result=subprocess.run(['/bin/sh','-c',command.replace(str(profile.with_name('candidate.json')),str(target))],capture_output=True,text=True,timeout=2)
+            self.assertEqual(result.returncode,0)
+            self.assertEqual(target.stat().st_mode&0o777,0o600)
+            self.assertIn('WAYLAND_DISPLAY',json.loads(target.read_text()))
     def test_failed_postcheck_keeps_failure_and_allows_later_evidence(self):
         receipt={'pass':True,'unit':'owned','normal_exit':True}
         def fail():raise RuntimeError('private diagnostic')
