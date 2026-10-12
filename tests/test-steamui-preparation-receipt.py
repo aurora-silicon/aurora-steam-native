@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: MIT
 """CPU failure evidence and actual private-file publication, no GPU/process mock."""
-import importlib.util,json,tempfile,unittest
+import importlib.util,json,tempfile,unittest,subprocess
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('prepare',Path(__file__).parents[1]/'libexec/steamui-headless-prepare.py')
 prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 class Receipt(unittest.TestCase):
+    def test_sway_shell_callback_reaches_writer(self):
+        profile=Path('/var/tmp/steamui/headless-'+'a'*16+'/env.json')
+        line=prepare.startup_config(profile).splitlines()[-1]
+        callback='/usr/bin/python3 /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)
+        command=line.removeprefix('exec ').replace(callback,'printf PROFILE_READY')
+        result=subprocess.run(['/bin/sh','-c',command],capture_output=True,text=True,timeout=2)
+        self.assertEqual(result.returncode,0);self.assertEqual(result.stdout,'PROFILE_READY')
+
     def test_failed_postcheck_keeps_failure_and_allows_later_evidence(self):
         receipt={'pass':True,'unit':'owned','normal_exit':True}
         def fail():raise RuntimeError('private diagnostic')

@@ -24,9 +24,16 @@ def save_receipt(path,receipt):
     temporary.replace(path)
     directory=os.open(path.parent,os.O_DIRECTORY);os.fsync(directory);os.close(directory)
 
-def stage(path,expected):
+def startup_config(profile):
+    if not re.fullmatch(r'/var/tmp/steamui/headless-[0-9a-f]{16}/env.json',str(profile)):raise RuntimeError('unexpected profile path')
+    attempts=' '.join(str(i) for i in range(1,21))
+    return 'xwayland force\noutput * resolution 1920x1080\nexec /bin/sh -c "for i in '+attempts+'; do /usr/bin/python3 /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)+' && exit 0; sleep 0.25; done; exit 1"\n'
+
+def stage(path,expected,reuse=False):
     if digest(path)!=expected:raise RuntimeError('helper archive hash drift')
-    if KIT.exists() or KIT.is_symlink():raise RuntimeError('kit exists; no overwrite/restart')
+    existing=KIT.exists()
+    if KIT.is_symlink() or existing and not reuse:raise RuntimeError('kit exists; explicit reviewed reuse required')
+    if reuse and not existing:raise RuntimeError('reviewed kit absent')
     parent=BASE.lstat()
     if not stat.S_ISDIR(parent.st_mode) or parent.st_uid!=0 or parent.st_mode&0o022:raise RuntimeError('kit parent unsafe')
     with tarfile.open(path) as tar:
@@ -34,11 +41,19 @@ def stage(path,expected):
         if len(set(names))!=len(names):raise RuntimeError('duplicate archive member')
         for m in members:
             if not m.isfile() or len(Path(m.name).parts)!=2 or Path(m.name).parts[0]!='full-kit71h' or '..' in Path(m.name).parts:raise RuntimeError('unsafe helper member')
-        KIT.mkdir(mode=0o755)
+        if existing:
+            st=KIT.lstat()
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022:raise RuntimeError('existing kit metadata unsafe')
+            if {p.name for p in KIT.iterdir()}-{'__pycache__'}!={Path(m.name).name for m in members}:raise RuntimeError('existing kit member set drift')
+        else:KIT.mkdir(mode=0o755)
         for m in members:
-            p=KIT/Path(m.name).name
-            with p.open('xb') as out:out.write(tar.extractfile(m).read())
-            p.chmod(0o644)
+            p=KIT/Path(m.name).name;data=tar.extractfile(m).read()
+            if existing:
+                st=p.lstat()
+                if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or st.st_mode&0o022 or p.read_bytes()!=data:raise RuntimeError('existing kit bytes/metadata drift')
+            else:
+                with p.open('xb') as out:out.write(data)
+                p.chmod(0o644)
     for line in (KIT/'SHA256SUMS').read_text().splitlines():
         sha,name=line.split('  ',1)
         if Path(name).name!=name or digest(KIT/name)!=sha:raise RuntimeError('helper member hash drift')
@@ -60,7 +75,7 @@ def execute(args):
     for service in ('speakerguardd.service','aurora-sep.service'):command(['systemctl','is-active',service])
     command(['rpm','-V','sway','wlroots','grim','mesa-dri-drivers','mesa-vulkan-drivers','mesa-libEGL'])
     cursor=command(['journalctl','-k','-n','0','--show-cursor']).split('-- cursor: ',1)[1]
-    stage(Path(args.kit_tar),args.kit_sha)
+    stage(Path(args.kit_tar),args.kit_sha,args.reuse_kit)
     gate=module('gate',KIT/'gates.py');values=gate.sample()
     if gate.reason(*values):raise RuntimeError('existing resource gate: '+gate.reason(*values))
     guard=module('guard',KIT/'session-guard.py')
@@ -68,7 +83,7 @@ def execute(args):
     private=BASE/('headless-'+tag);private.mkdir(mode=0o700);os.chown(private,UID,UID)
     evidence=Path('/var/tmp/aurora-headless-prep-'+tag);evidence.mkdir(mode=0o700)
     profile=private/'env.json';config=private/'sway.conf'
-    config.write_text('xwayland force\noutput * resolution 1920x1080\nexec /bin/sh -c "for i in $(seq 1 20); do /usr/bin/python3 /var/tmp/steamui/full-kit71h/headless-profile.py '+str(profile)+' && exit 0; sleep 0.25; done; exit 1"\n')
+    config.write_text(startup_config(profile))
     config.chmod(0o600);os.chown(config,UID,UID)
     env={'PATH':'/usr/bin:/bin','HOME':'/home/user','XDG_RUNTIME_DIR':'/run/user/1000','DBUS_SESSION_BUS_ADDRESS':'unix:path=/run/user/1000/bus','WLR_BACKENDS':'headless','WLR_HEADLESS_OUTPUTS':'1','WLR_RENDERER':'gles2','MESA_LOADER_DRIVER_OVERRIDE':'zink','GALLIUM_DRIVER':'zink','LIBGL_KOPPER_DISABLE':'true','WLR_XWAYLAND':'/usr/bin/Xwayland','AURORA_HEADLESS_TOKEN':token,'AURORA_HEADLESS_UNIT':unit}
     receipt={'unit':unit,'pattern_unit':pattern,'profile':str(profile),'evidence':str(evidence),'kit_sha256':args.kit_sha,'boot_id':args.boot_id,'resource_before':values,'qualification_scope':'owned isolated preparation/capture; no Steam/GPU conformance/physical display grade','pass':False,'normal_exit':False}
@@ -86,7 +101,7 @@ def execute(args):
         receipt['launch_attempted']=True;receipt['ownership_token_sha256']=hashlib.sha256(token.encode()).hexdigest()
         save_receipt(evidence/'receipt.json',receipt)
         started=True
-        sender=subprocess.Popen(['systemd-run','--user','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)],user=UID,group=UID,extra_groups=os.getgrouplist('user',UID),env={k:env[k] for k in ('PATH','HOME','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS')},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        sender=subprocess.Popen(['systemd-run','--user','--description=Aurora isolated headless preparation','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)],user=UID,group=UID,extra_groups=os.getgrouplist('user',UID),env={k:env[k] for k in ('PATH','HOME','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS')},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         receipt['launch_sender_pid']=sender.pid;save_receipt(evidence/'receipt.json',receipt)
         sender.communicate(timeout=15)
         if sender.returncode:raise RuntimeError('owned unit launch sender failed')
@@ -166,4 +181,5 @@ def execute(args):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('boot-id','notes-sha','kit-tar','kit-sha'):parser.add_argument('--'+name,required=True)
+    parser.add_argument('--reuse-kit',action='store_true')
     raise SystemExit(execute(parser.parse_args()))
