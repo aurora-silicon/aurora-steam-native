@@ -72,9 +72,9 @@ def execute(args):
     config.chmod(0o600);os.chown(config,UID,UID)
     env={'PATH':'/usr/bin:/bin','HOME':'/home/user','XDG_RUNTIME_DIR':'/run/user/1000','DBUS_SESSION_BUS_ADDRESS':'unix:path=/run/user/1000/bus','WLR_BACKENDS':'headless','WLR_HEADLESS_OUTPUTS':'1','WLR_RENDERER':'gles2','MESA_LOADER_DRIVER_OVERRIDE':'zink','GALLIUM_DRIVER':'zink','LIBGL_KOPPER_DISABLE':'true','WLR_XWAYLAND':'/usr/bin/Xwayland','AURORA_HEADLESS_TOKEN':token,'AURORA_HEADLESS_UNIT':unit}
     receipt={'unit':unit,'pattern_unit':pattern,'profile':str(profile),'evidence':str(evidence),'kit_sha256':args.kit_sha,'boot_id':args.boot_id,'resource_before':values,'qualification_scope':'owned isolated preparation/capture; no Steam/GPU conformance/physical display grade','pass':False,'normal_exit':False}
-    started=False;identity=None;client=None
-    def unit_state():
-        result=subprocess.run(USER+['systemctl','--user','show',unit,'--property=LoadState','--property=ActiveState','--property=MainPID','--property=Job'],capture_output=True,text=True,timeout=10)
+    started=False;identity=None;client=None;sender=None
+    def unit_state(name=unit):
+        result=subprocess.run(USER+['systemctl','--user','show',name,'--property=LoadState','--property=ActiveState','--property=MainPID','--property=Job'],capture_output=True,text=True,timeout=10)
         state=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
         if result.returncode and state.get('LoadState')!='not-found':raise RuntimeError('cannot verify owned unit state')
         if state.get('LoadState')=='not-found':return dict(LoadState='not-found',ActiveState='inactive',MainPID='0',Job='')
@@ -86,7 +86,10 @@ def execute(args):
         receipt['launch_attempted']=True;receipt['ownership_token_sha256']=hashlib.sha256(token.encode()).hexdigest()
         save_receipt(evidence/'receipt.json',receipt)
         started=True
-        command(USER+['systemd-run','--user','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)])
+        sender=subprocess.Popen(['systemd-run','--user','--unit='+unit,'--collect','-p','LimitCORE=0','-p','KillMode=process','/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],'/usr/bin/sway','--unsupported-gpu','-c',str(config)],user=UID,group=UID,extra_groups=os.getgrouplist('user',UID),env={k:env[k] for k in ('PATH','HOME','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS')},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        receipt['launch_sender_pid']=sender.pid;save_receipt(evidence/'receipt.json',receipt)
+        sender.communicate(timeout=15)
+        if sender.returncode:raise RuntimeError('owned unit launch sender failed')
         deadline=time.monotonic()+12
         while not profile.exists() and time.monotonic()<deadline:time.sleep(.1)
         j=guard.headless(profile);identity=(j['sway_pid'],j['sway_start'])
@@ -114,6 +117,10 @@ def execute(args):
     except BaseException as error:
         receipt['error']=type(error).__name__;receipt['error_rc']=getattr(error,'returncode',None)
     finally:
+        receipt['launch_sender_settled']=sender is None or sender.poll() is not None
+        if sender is not None and sender.poll() is None:
+            try:sender.communicate(timeout=10);receipt['launch_sender_settled']=True
+            except subprocess.TimeoutExpired:receipt['launch_sender_unresolved']=True;receipt['pass']=False
         if client is not None and client.poll() is None:
             try:client.wait(timeout=15)
             except subprocess.TimeoutExpired:receipt['pattern_still_live']=True;receipt['pass']=False
@@ -136,7 +143,9 @@ def execute(args):
                         try:
                             if any(line.startswith('0::') and Path(line[3:]).name in (unit,pattern) for line in (process/'cgroup').read_text().splitlines()):live.append(int(process.name))
                         except (FileNotFoundError,ProcessLookupError):pass
-                    if not live and (state['LoadState']=='not-found' or state['ActiveState'] in ('inactive','failed') and state['Job'] in ('','0')):
+                    pattern_state=unit_state(pattern)
+                    terminal=lambda x:x['LoadState']=='not-found' or x['ActiveState'] in ('inactive','failed') and x['Job'] in ('','0')
+                    if not live and receipt['launch_sender_settled'] and (client is None or client.poll() is not None) and terminal(state) and terminal(pattern_state):
                         receipt['normal_exit']=True;break
                     time.sleep(.1)
                 if not receipt['normal_exit']:raise RuntimeError('owned unit/descendants remain; no forced stop or launch retry')
@@ -150,7 +159,7 @@ def execute(args):
             receipt['matching_new_kernel_errors']=len(errors)
             return not errors
         postcheck(receipt,'kernel_errors_absent',kernel_check)
-        if not all(receipt.get(k) for k in ('normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent')):receipt['pass']=False
+        if not all(receipt.get(k) for k in ('launch_sender_settled','normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent')):receipt['pass']=False
         save_receipt(evidence/'receipt.json',receipt)
     print(json.dumps(receipt,sort_keys=True))
     return 0 if receipt['pass'] else 2
