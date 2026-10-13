@@ -114,7 +114,16 @@ def inactive():
 def display():
     return command(USER+['gdbus','call','--address','unix:path=/run/user/1000/bus','--dest','org.gnome.Mutter.DisplayConfig','--object-path','/org/gnome/Mutter/DisplayConfig','--method','org.gnome.Mutter.DisplayConfig.GetCurrentState'])
 
-def execute(args):
+def record_failure(receipt,error):
+    receipt['pass']=False;receipt['error']=type(error).__name__;receipt['error_rc']=getattr(error,'returncode',None)
+
+def final_grade(receipt):
+    return receipt.get('pass') is True and all(receipt.get(k) is True for k in ('launch_sender_settled','normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent'))
+
+def compositor_may_close(receipt):
+    return not receipt.get("ui_launch_attempted",False) or receipt.get("ui_restoration_complete") is True
+
+def execute(args,work=None):
     if os.geteuid()!=0:raise RuntimeError('root operator required')
     if Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=args.boot_id or digest(Path('/sys/kernel/notes'))!=args.notes_sha:raise RuntimeError('boot/kernel identity drift')
     if digest(Path('/var/tmp/aurora-output-gamma919.py'))!='57ed68e0131f639d09e6f4382433346cc8e37bca287928d2eaab6db820df661b':raise RuntimeError('public frame helper drift')
@@ -183,8 +192,9 @@ def execute(args):
         after=gate.sample();receipt['resource_after']=after
         if gate.reason(*after):raise RuntimeError('post-preparation resource gate failed')
         receipt['pass']=True
+        if work is not None:work(profile,evidence,guard,receipt)
     except BaseException as error:
-        receipt['error']=type(error).__name__;receipt['error_rc']=getattr(error,'returncode',None)
+        record_failure(receipt,error)
     finally:
         receipt['launch_sender_settled']=sender is None or sender.poll() is not None
         if sender is not None and sender.poll() is None:
@@ -193,7 +203,9 @@ def execute(args):
         if client is not None and client.poll() is None:
             try:client.wait(timeout=15)
             except subprocess.TimeoutExpired:receipt['pattern_still_live']=True;receipt['pass']=False
-        if started:
+        if started and not compositor_may_close(receipt):
+            receipt["compositor_retained_for_incomplete_ui"]=True;receipt["pass"]=False
+        if started and compositor_may_close(receipt):
             try:
                 deadline=time.monotonic()+15;exit_sent=False
                 while time.monotonic()<deadline:
@@ -228,7 +240,7 @@ def execute(args):
             receipt['matching_new_kernel_errors']=len(errors)
             return not errors
         postcheck(receipt,'kernel_errors_absent',kernel_check)
-        if not all(receipt.get(k) for k in ('launch_sender_settled','normal_exit','physical_state_unchanged','taint_unchanged','protective_services_active','kernel_errors_absent')):receipt['pass']=False
+        receipt['pass']=final_grade(receipt)
         save_receipt(evidence/'receipt.json',receipt)
     print(json.dumps(receipt,sort_keys=True))
     return 0 if receipt['pass'] else 2
