@@ -31,6 +31,26 @@ existing installation or a conflicting link. It also installs
 `steam-native4k`, its launch loop and a desktop entry under `~/.local`; the
 icon is copied from the freshly installed client.
 
+For an offline first-user installation, an operator can stage the exact Valve
+manifest and all archives in an image-owned cache. Supply the manifest hash
+from the reviewed image/package receipt, independently of the cache contents:
+
+    ./install-steam-arm64.py --offline-manifest /path/to/steam_client_publicbeta_linuxarm64 \
+      --manifest-sha256 <trusted-64-character-sha256> --downloads /path/to/archives
+
+This route never fetches a manifest or an archive. It verifies the pinned
+manifest, freezes and checks every archive's size and SHA-256 before extracting
+anything, and refuses missing/partial, malformed, symlinked or mismatched cache
+inputs. Archive paths and symlink targets must stay inside the extraction
+directory; confined relative symlinks remain supported. Failures preserve the
+cache and do not fall back to the network. The
+manifest hash is an operator trust input; calculating it from an untrusted
+cache does not authenticate that cache. Temporary archive snapshots require
+additional free space equal to the compressed cache. The cache contains vendor
+assets, not account state; the installation still belongs to the desktop user.
+This project does not ship Valve assets. Offline client installation does not
+supply Proton/FEX runtimes or make Steam's later operation offline.
+
 To keep an existing client (found through `~/.steam/root`) and only install or
 refresh the launcher, desktop entry and links:
 
