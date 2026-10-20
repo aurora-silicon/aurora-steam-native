@@ -11,7 +11,12 @@ done
   echo 'Native Wine components are not executable' >&2; exit 2;
 }
 AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-$(command -v userpages || echo /usr/libexec/aurora/userpages)}
-[ -x "$AURORA_USERPAGES_LAUNCHER" ] || { echo 'Public userpages launcher missing' >&2; exit 2; }
+# Steam runs this tool inside the Steam Linux Runtime container, where the host's
+# /usr is only visible below /run/host. Fall back to the host copy there.
+if [ ! -x "$AURORA_USERPAGES_LAUNCHER" ] && [ -x "/run/host$AURORA_USERPAGES_LAUNCHER" ]; then
+  AURORA_USERPAGES_LAUNCHER="/run/host$AURORA_USERPAGES_LAUNCHER"
+fi
+[ -x "$AURORA_USERPAGES_LAUNCHER" ] || { echo "Public userpages launcher missing: $AURORA_USERPAGES_LAUNCHER" >&2; exit 2; }
 # GE's public launcher selects these same native binaries for PROTON_USE_ARM64=1.
 export PROTON_USE_ARM64=1
 export WINESERVER="$TOOL/files/bin-arm64/wineserver"
