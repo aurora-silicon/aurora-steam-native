@@ -7,10 +7,25 @@
 set -euo pipefail
 : "${AURORA_STEAM_ROOT:?native Valve Steam root required}"
 # userpages is built from tools/aurora-userpages in the aurora-silicon/linux tree.
-export AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-/usr/libexec/aurora/userpages}
+# Exported: Proton compatibility tools started by Steam run their native Wine under
+# the same launcher and read this variable from the environment.
+export AURORA_USERPAGES_LAUNCHER=${AURORA_USERPAGES_LAUNCHER:-$(command -v userpages || echo /usr/libexec/aurora/userpages)}
 [ -x "$AURORA_USERPAGES_LAUNCHER" ] || { echo "userpages launcher not found: $AURORA_USERPAGES_LAUNCHER" >&2; exit 2; }
 [ -x "$AURORA_STEAM_ROOT/steamrtarm64/steam" ]
 export AURORA_STEAM_ROOT
+# Valve's steam.sh raises the soft open-file limit to the hard limit before it
+# starts the client; the native entry point skips that script. Under a systemd
+# user unit the soft limit is 1024, and current clients exhaust it while starting
+# ("socket(): Too many open files"), then crash.
+ulimit -Sn "$(ulimit -Hn)" 2>/dev/null || true
+# FEX titles render through the guest graphics provider. The stock guest rootfs
+# carries a Mesa without Apple G17P support (every GPU job fails with EINVAL);
+# prefer the Aurora provider, built from the same Mesa source as the host
+# driver, when it is installed and the caller did not choose one.
+AURORA_FEX_GRAPHICS_PROVIDER=${AURORA_FEX_GRAPHICS_PROVIDER:-/usr/share/guestos/aurora-fex-mesa/graphics_provider.json}
+if [ -z "${STEAM_COMPAT_GRAPHICS_PROVIDER:-}" ] && [ -r "$AURORA_FEX_GRAPHICS_PROVIDER" ]; then
+ export STEAM_COMPAT_GRAPHICS_PROVIDER=$AURORA_FEX_GRAPHICS_PROVIDER
+fi
 # The session can retain an older deprecated ICD override after the Steam
 # wrapper selects a newer prefix. Keep one source of Vulkan driver selection
 # for Steam and every runtime child; older loaders use their default catalog.
