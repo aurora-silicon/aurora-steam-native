@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Aurora Play
+Comment=Launch your Steam games with Aurora Proton
+Exec=aurora-play
+Icon=org.aurorasilicon.Play
+Terminal=false
+Categories=Game;
+Keywords=steam;proton;games;mangohud;
+StartupNotify=true
