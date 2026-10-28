@@ -20,6 +20,12 @@ fi
 # GE's public launcher selects these same native binaries for PROTON_USE_ARM64=1.
 export PROTON_USE_ARM64=1
 export WINESERVER="$TOOL/files/bin-arm64/wineserver"
+# Present through Wine's Wayland driver by default. Under XWayland every
+# frame takes an extra copy and XWayland's own pacing, which stutters at
+# high frame rates, and Wine picks the monitor at the X origin, not the
+# primary one. Proton only uses it when WAYLAND_DISPLAY is set; a game opts
+# out with PROTON_ENABLE_WAYLAND=0 in its launch options.
+export PROTON_ENABLE_WAYLAND=${PROTON_ENABLE_WAYLAND-1}
 # GE configures its Wine library directories and native FEX bridges. Keep its
 # normal CLI/Steam environment and use the session's public graphics drivers.
 exec "$AURORA_USERPAGES_LAUNCHER" 4k /usr/bin/python3 "$TOOL/proton" "$@"
