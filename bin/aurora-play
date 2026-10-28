@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Ryan Murray <ryan@aurorasilicon.org>
+#
+# Aurora Play: a small launcher for the Steam games installed for the native
+# ARM64 Steam client, with a MangoHud switch for Aurora Proton.
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, Gtk, Pango  # noqa: E402
+
+APP_ID = "org.aurorasilicon.Play"
+HOME = Path.home()
+STEAM = Path(os.environ.get("AURORA_STEAM_ROOT") or (HOME / ".steam/root")).resolve()
+LAUNCHER = Path(__file__).resolve().with_name("steam-native4k")
+if not LAUNCHER.is_file():
+    LAUNCHER = HOME / ".local/bin/steam-native4k"
+APPS = Path(os.environ.get("XDG_DATA_HOME") or (HOME / ".local/share")) / "applications"
+MARKER = "# Managed by Aurora Play"
+
+# Steam runtimes, redistributables and compatibility tools are not games.
+NOT_GAMES = re.compile(r"^(Steam Linux Runtime|Steamworks Common|Proton|FEX$)", re.I)
+# Executables shipped beside a game that are not the game window.
+NOT_GAME_EXES = re.compile(r"crash|launcher|unins|redist|setup|helper|dxsetup|install|report|uploader", re.I)
+
+MANGOHUD_SETTINGS = f"""{MARKER}: MangoHud for every Aurora Proton game. Switch it off in Aurora Play.
+user_settings = {{
+    "MANGOHUD": "1",
+    "MANGOHUD_CONFIG": "fps,frametime,frame_timing,gpu_stats,cpu_stats,ram,vram,engine_version,wine,resolution,output_folder={HOME}/mangologs,toggle_logging=Shift_L+F2",
+}}
+"""
+
+CSS = b"""
+.cover { border-radius: 12px; }
+.card { padding: 6px; border-radius: 16px; transition: background 150ms ease; }
+.card:hover { background: alpha(@accent_bg_color, 0.18); }
+.card label { font-weight: 600; }
+"""
+
+
+def library_folders():
+    """Every Steam library folder, the main one first."""
+    folders = [STEAM]
+    vdf = STEAM / "steamapps/libraryfolders.vdf"
+    try:
+        for path in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text()):
+            p = Path(path)
+            if p not in folders:
+                folders.append(p)
+    except OSError:
+        pass
+    return folders
+
+
+def game_manifests():
+    """(library folder, appid, name, install dir) of every installed game."""
+    seen = set()
+    for folder in library_folders():
+        for acf in (folder / "steamapps").glob("appmanifest_*.acf"):
+            try:
+                text = acf.read_text(errors="replace")
+            except OSError:
+                continue
+            appid = re.search(r'"appid"\s+"(\d+)"', text)
+            name = re.search(r'"name"\s+"([^"]+)"', text)
+            inst = re.search(r'"installdir"\s+"([^"]+)"', text)
+            if not (appid and name) or NOT_GAMES.search(name.group(1)) or appid.group(1) in seen:
+                continue
+            seen.add(appid.group(1))
+            yield folder, appid.group(1), name.group(1), inst.group(1) if inst else None
+
+
+def installed_games():
+    games = [(appid, name) for _, appid, name, _ in game_manifests()]
+    return sorted(games, key=lambda g: g[1].lower())
+
+
+def write_window_entries():
+    """Hidden desktop entries that let the shell name Proton game windows.
+
+    Wine's Wayland driver uses the game's .exe name as the window's app id, so
+    without a desktop entry whose StartupWMClass matches it, the shell shows
+    the window without a name or icon and leaves it out of the app switcher.
+    """
+    APPS.mkdir(parents=True, exist_ok=True)
+    for folder, appid, name, inst in game_manifests():
+        entry = APPS / f"aurora-game-{appid}.desktop"
+        if not inst or (entry.is_file() and MARKER not in entry.read_text(errors="replace")):
+            continue
+        gamedir = folder / "steamapps/common" / inst
+        exes = [p for p in (*gamedir.glob("*.exe"), *gamedir.glob("*/*.exe"))
+                if p.is_file() and not NOT_GAME_EXES.search(p.name)]
+        if not exes:
+            continue  # a native Linux game names its own window
+        exe = max(exes, key=lambda p: p.stat().st_size).name
+        icon = cover_for(appid)
+        entry.write_text("[Desktop Entry]\nType=Application\n"
+                         f"Name={name}\nComment=Steam game (Aurora Proton)\n"
+                         f"Exec={LAUNCHER} steam://rungameid/{appid}\n"
+                         f"Icon={icon or 'applications-games'}\nStartupWMClass={exe}\n"
+                         f"NoDisplay=true\nTerminal=false\nCategories=Game;\n{MARKER}\n")
+
+
+def cover_for(appid):
+    cache = STEAM / "appcache/librarycache" / appid
+    for name in ("library_600x900.jpg", "library_600x900_2x.jpg", "header.jpg", "library_header.jpg"):
+        if (cache / name).is_file():
+            return cache / name
+    return None
+
+
+def proton_settings_files():
+    tools = STEAM / "compatibilitytools.d"
+    return [d / "user_settings.py" for d in sorted(tools.glob("Aurora-Proton*")) if d.is_dir()]
+
+
+def mangohud_enabled():
+    files = proton_settings_files()
+    return bool(files) and all(f.is_file() and '"MANGOHUD": "1"' in f.read_text() for f in files)
+
+
+def set_mangohud(enabled):
+    for f in proton_settings_files():
+        if enabled:
+            f.write_text(MANGOHUD_SETTINGS)
+        elif f.is_file() and '"MANGOHUD": "1"' in f.read_text():
+            # Only remove settings that switch MangoHud on, ours or the test ones.
+            f.unlink()
+    if enabled:
+        (HOME / "mangologs").mkdir(exist_ok=True)
+
+
+class GameCard(Gtk.Button):
+    def __init__(self, appid, name, on_launch):
+        super().__init__(css_classes=["flat", "card"], tooltip_text=f"Play {name}")
+        self.appid, self.name = appid, name
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        cover = cover_for(appid)
+        if cover:
+            picture = Gtk.Picture(file=Gio.File.new_for_path(str(cover)),
+                                  content_fit=Gtk.ContentFit.COVER, css_classes=["cover"])
+            picture.set_size_request(140, 210)
+            box.append(picture)
+        else:
+            box.append(Gtk.Image(icon_name="applications-games-symbolic", pixel_size=96,
+                                 width_request=140, height_request=210))
+        box.append(Gtk.Label(label=name, ellipsize=Pango.EllipsizeMode.END, max_width_chars=16))
+        self.set_child(box)
+        self.connect("clicked", lambda *_: on_launch(self))
+
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Aurora Play", default_width=760, default_height=560)
+        self.toasts = Adw.ToastOverlay()
+
+        header = Adw.HeaderBar()
+        self.search = Gtk.SearchEntry(placeholder_text="Find a game")
+        self.search.connect("search-changed", lambda *_: self.flow.invalidate_filter())
+        header.set_title_widget(self.search)
+
+        hud = Gtk.Box(spacing=6, tooltip_text="Show the MangoHud overlay in Aurora Proton games")
+        hud.append(Gtk.Label(label="Stats"))
+        self.hud_switch = Gtk.Switch(active=mangohud_enabled(), valign=Gtk.Align.CENTER)
+        self.hud_switch.connect("notify::active", self.on_hud)
+        hud.append(self.hud_switch)
+        header.pack_end(hud)
+
+        self.flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                                max_children_per_line=8, min_children_per_line=2,
+                                row_spacing=12, column_spacing=12,
+                                margin_top=18, margin_bottom=18, margin_start=18, margin_end=18,
+                                valign=Gtk.Align.START)
+        self.flow.set_filter_func(self.filter)
+        games = installed_games()
+        for appid, name in games:
+            self.flow.append(GameCard(appid, name, self.launch))
+
+        body = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        body.set_child(self.flow)
+        if not games:
+            body.set_child(Adw.StatusPage(icon_name="applications-games-symbolic",
+                                          title="No games yet",
+                                          description="Install a game in Steam and it shows up here."))
+        self.toasts.set_child(body)
+
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.set_content(self.toasts)
+        self.set_content(view)
+
+    def filter(self, child):
+        text = self.search.get_text().strip().lower()
+        return not text or text in child.get_child().name.lower()
+
+    def on_hud(self, switch, _param):
+        try:
+            set_mangohud(switch.get_active())
+            msg = "Stats on for Aurora Proton games" if switch.get_active() else "Stats off"
+        except OSError as e:
+            msg = f"Could not change MangoHud: {e.strerror}"
+        self.toasts.add_toast(Adw.Toast(title=msg, timeout=2))
+
+    def launch(self, card):
+        if not LAUNCHER.is_file():
+            self.toasts.add_toast(Adw.Toast(title="Steam launcher not found"))
+            return
+        subprocess.Popen([str(LAUNCHER), f"steam://rungameid/{card.appid}"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        self.toasts.add_toast(Adw.Toast(title=f"Launching {card.name}…", timeout=3))
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda *_: self.quit())
+        self.add_action(quit_action)
+        self.set_accels_for_action("app.quit", ["<Control>q"])
+
+    def do_activate(self):
+        try:
+            write_window_entries()
+        except OSError:
+            pass  # only window names in the shell depend on it
+        (self.props.active_window or Window(self)).present()
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

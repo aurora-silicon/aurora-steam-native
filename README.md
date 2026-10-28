@@ -75,6 +75,16 @@ Windows games run through an ARM64 Proton build (for example GE-Proton's
 Wine signal-handling fix that ARM64 Proton currently needs on CPUs that
 implement SME without SVE.
 
+## Aurora Play
+
+`aurora-play` (installed next to `steam-native4k`) is a small GTK 4 launcher
+that shows the installed games with their library covers. Its Stats switch
+turns the MangoHud overlay on or off for every Aurora Proton game by writing
+or removing the tool's `user_settings.py`. On start it also writes hidden
+desktop entries (`aurora-game-<appid>.desktop`) whose `StartupWMClass` is the
+game's .exe name, which is the app id Wine's Wayland driver gives the window,
+so the shell shows each game by name in the app switcher.
+
 ## Licence
 
 The launcher, installer and documentation are MIT (`LICENSES/MIT.txt`).

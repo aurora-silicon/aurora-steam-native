@@ -216,6 +216,13 @@ def install_launcher(root, prefix, home):
     icon = root / 'public/steam_tray_mono.png'
     if icon.exists():
         install_file(icon, prefix / 'share/icons/hicolor/48x48/apps/steam-native-arm64.png', 0o644)
+    # Aurora Play, the small game launcher, lives beside steam-native4k.
+    install_file(HERE / 'bin/aurora-play', prefix / 'bin/aurora-play', 0o755)
+    play = (HERE / 'share/applications/org.aurorasilicon.Play.desktop').read_text()
+    play = play.replace('Exec=aurora-play', 'Exec=' + str((prefix / 'bin/aurora-play').absolute()))
+    (apps / 'org.aurorasilicon.Play.desktop').write_text(play)
+    install_file(HERE / 'share/icons/hicolor/scalable/apps/org.aurorasilicon.Play.svg',
+                 prefix / 'share/icons/hicolor/scalable/apps/org.aurorasilicon.Play.svg', 0o644)
     if shutil.which('update-desktop-database'):
         subprocess.run(['update-desktop-database', str(apps)], check=False)
 
