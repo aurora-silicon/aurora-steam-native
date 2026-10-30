@@ -121,20 +121,41 @@ def proton_settings_files():
     return [d / "user_settings.py" for d in sorted(tools.glob("Aurora-Proton*")) if d.is_dir()]
 
 
+def read_settings(f):
+    try:
+        return f.read_text(errors="replace")
+    except FileNotFoundError:
+        return None
+
+
+def managed(text):
+    return text is not None and text.startswith(MARKER)
+
+
 def mangohud_enabled():
     files = proton_settings_files()
-    return bool(files) and all(f.is_file() and '"MANGOHUD": "1"' in f.read_text() for f in files)
+    return bool(files) and all('"MANGOHUD": "1"' in (read_settings(f) or "") for f in files)
 
 
 def set_mangohud(enabled):
+    """Write or remove our user_settings.py in every Aurora Proton build.
+
+    A user_settings.py that Aurora Play did not write is the person's own
+    Proton configuration: it is never overwritten or removed. Returns how many
+    such files were left as they are.
+    """
+    kept = 0
     for f in proton_settings_files():
-        if enabled:
+        text = read_settings(f)
+        if text is not None and not managed(text):
+            kept += 1
+        elif enabled:
             f.write_text(MANGOHUD_SETTINGS)
-        elif f.is_file() and '"MANGOHUD": "1"' in f.read_text():
-            # Only remove settings that switch MangoHud on, ours or the test ones.
+        elif text is not None:
             f.unlink()
     if enabled:
         (HOME / "mangologs").mkdir(exist_ok=True)
+    return kept
 
 
 class GameCard(Gtk.Button):
@@ -202,8 +223,10 @@ class Window(Adw.ApplicationWindow):
 
     def on_hud(self, switch, _param):
         try:
-            set_mangohud(switch.get_active())
+            kept = set_mangohud(switch.get_active())
             msg = "Stats on for Aurora Proton games" if switch.get_active() else "Stats off"
+            if kept:
+                msg += f"; {kept} Proton build(s) with your own user_settings.py left unchanged"
         except OSError as e:
             msg = f"Could not change MangoHud: {e.strerror}"
         self.toasts.add_toast(Adw.Toast(title=msg, timeout=2))
