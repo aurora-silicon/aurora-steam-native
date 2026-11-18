@@ -1,0 +1,105 @@
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index b194188..4f8a384 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -25572,9 +25572,23 @@ static void d3d12_command_queue_wait_staggered_submission(struct d3d12_command_q
+     VkResult vr;
+ 
++    uint64_t value = command_queue->last_submission_timeline_value;
++
++    if (d3d12_device_uses_borealis_g17c_queue_policy(command_queue->device))
++    {
++        /* Let the other queue submit while two chunks from this queue are
++         * in flight. Keep the history on the logical queue, since values
++         * from other queues may interleave on the Vulkan timeline. */
++        uint64_t previous = command_queue->stagger_previous_value;
++        command_queue->stagger_previous_value = value;
++        if (!previous)
++            return;
++        value = previous;
++    }
++
+     memset(&wait_info, 0, sizeof(wait_info));
+     wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+     wait_info.semaphoreCount = 1;
+     wait_info.pSemaphores = &command_queue->vkd3d_queue->submission_timeline;
+-    wait_info.pValues = &command_queue->last_submission_timeline_value;
++    wait_info.pValues = &value;
+ 
+     if ((vr = VK_CALL(vkWaitSemaphores(command_queue->device->vk_device, &wait_info, UINT64_MAX))))
+@@ -25706,4 +25720,5 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
+     if (command_queue->stagger_submissions != stagger_submissions)
+     {
++        command_queue->stagger_previous_value = 0;
+         command_queue->stagger_submissions = stagger_submissions;
+         INFO("%sabling staggered submissions for command queue %p, queue family %u.\n",
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 3139d6d..58e22f2 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -3006,5 +3006,5 @@ static HRESULT vkd3d_select_queues(const struct d3d12_device *device,
+ 
+     memset(info, 0, sizeof(*info));
+-    single_queue = VKD3D_CONFIG_FLAG_IS_SET(SINGLE_QUEUE);
++    single_queue = VKD3D_CONFIG_FLAG_IS_SET(SINGLE_QUEUE) || d3d12_device_uses_borealis_g17c_queue_policy(device);
+ 
+     VK_CALL(vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, NULL));
+diff --git a/libs/vkd3d/device_workarounds.c b/libs/vkd3d/device_workarounds.c
+index bfe7a47..1c1e929 100644
+--- a/libs/vkd3d/device_workarounds.c
++++ b/libs/vkd3d/device_workarounds.c
+@@ -1037,4 +1037,11 @@ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_i
+         struct d3d12_device *device)
+ {
++    if (d3d12_device_uses_borealis_g17c_queue_policy(device))
++    {
++        /* Keep explicit attachment and shader-read layouts on Borealis G17C. */
++        info->unified_image_layouts_features.unifiedImageLayouts = VK_FALSE;
++        info->unified_image_layouts_features.unifiedImageLayoutsVideo = VK_FALSE;
++    }
++
+     /* A performance workaround for NV.
+      * The 16 byte offset is a lie, as that is only actually required when we
+@@ -1182,4 +1189,12 @@ bool vkd3d_application_attempts_complex_multiview(void)
+ VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS vkd3d_debug_control_get_behavior_flags(void);
+ 
++bool d3d12_device_uses_borealis_g17c_queue_policy(const struct d3d12_device *device)
++{
++    return !VKD3D_CONFIG_FLAG_IS_SET(SKIP_DRIVER_WORKAROUNDS) &&
++            device->device_info.properties2.properties.deviceID == 0x6050 &&
++            strstr(device->device_info.properties2.properties.deviceName, "(G17C ") &&
++            !strcmp(device->device_info.vulkan_1_2_properties.driverName, "Borealis");
++}
++
+ void d3d12_device_init_workarounds(struct d3d12_device *device)
+ {
+@@ -1225,4 +1240,13 @@ void d3d12_device_init_workarounds(struct d3d12_device *device)
+     }
+ 
++    if (d3d12_device_uses_borealis_g17c_queue_policy(device))
++    {
++        /* Suspending rendering across command lists costs GPU time on G17C.
++         * Keep the framebuffer-local barriers on both Borealis driver IDs. */
++        device->workarounds.tiler_renderpass_barriers = true;
++        device->workarounds.tiler_suspend_resume = false;
++        INFO("Using the Borealis G17C single queue, render-pass barriers and explicit image layouts.\n");
++    }
++
+     /* For testing purposes, allow us to exercise all code paths on all GPUs. */
+     if (vkd3d_debug_control_get_behavior_flags() & VKD3D_DEBUG_CONTROL_BEHAVIOR_ENABLE_TILER_SYNC)
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index e63dc7b..d22fdf7 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -3939,4 +3939,5 @@ struct d3d12_command_queue
+     uint64_t last_submission_timeline_value;
+     UINT64 last_submission_time_ns;
++    uint64_t stagger_previous_value;
+     bool stagger_submissions;
+ 
+@@ -7276,4 +7277,5 @@ bool vkd3d_application_has_broken_wave128(void);
+ bool vkd3d_application_requires_min16_denorms(void);
+ bool vkd3d_application_attempts_complex_multiview(void);
++bool d3d12_device_uses_borealis_g17c_queue_policy(const struct d3d12_device *device);
+ void d3d12_device_init_workarounds(struct d3d12_device *device);
+ uint32_t vkd3d_get_instance_application_version(void);
