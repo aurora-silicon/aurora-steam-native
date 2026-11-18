@@ -1,0 +1,46 @@
+From: Erik Bourget <erik@ebourget.net>
+Subject: [PATCH] win32u: yield directly on empty NtUserPeekMessage
+
+License: LGPL-2.1-or-later, matching dlls/win32u/message.c.
+That file carries Copyright 2001 Alexandre Julliard and Copyright 2008
+Maarten Lankhorst.
+
+NtUserPeekMessage() discards the NTSTATUS returned by NtYieldExecution().
+On Unix builds with RUSAGE_THREAD, NtYieldExecution() wraps sched_yield()
+in two getrusage(RUSAGE_THREAD) calls solely to determine whether to
+return STATUS_SUCCESS or STATUS_NO_YIELD_PERFORMED.
+
+Call sched_yield() directly when available so empty message polls do not
+pay for two getrusage() syscalls whose result is discarded.
+
+Signed-off-by: Erik Bourget <erik@ebourget.net>
+
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -24,7 +24,12 @@
+ #pragma makedep unix
+ #endif
+ 
++#include "config.h"
++
+ #include <assert.h>
++#ifdef HAVE_SCHED_H
++#include <sched.h>
++#endif
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "winternl.h"
+@@ -3667,7 +3672,13 @@
+                 params.locks = *(DWORD *)ret_ptr;
+                 params.restore = TRUE;
+             }
++            /* PeekMessage does not return the yield status. Avoid collecting
++             * context-switch counts solely to discard the result. */
++#if defined(HAVE_SCHED_H) && defined(HAVE_SCHED_YIELD)
++            sched_yield();
++#else
+             NtYieldExecution();
++#endif
+             KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
+         }
+         return FALSE;
