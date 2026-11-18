@@ -1,0 +1,70 @@
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -24,7 +24,13 @@
+ #pragma makedep unix
+ #endif
+
++#include "config.h"
++
+ #include <assert.h>
++#if defined(__linux__) && defined(__aarch64__) && defined(HAVE_SCHED_YIELD)
++#include <sched.h>
++#include <time.h>
++#endif
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "winternl.h"
+@@ -3466,6 +3472,31 @@
+     return counter.QuadPart * 8000 / freq.QuadPart; /* 8kHz */
+ }
+
++#if defined(__linux__) && defined(__aarch64__) && defined(HAVE_SCHED_YIELD)
++/* Back off after a burst of empty polls within one driver-event check
++ * interval. Sparse polls still yield without requesting a sleep. */
++static __thread unsigned int empty_peeks;
++static __thread LONGLONG empty_peek_tick;
++
++static void yield_empty_peek(void)
++{
++    LONGLONG tick = get_driver_check_time();
++
++    if (tick != empty_peek_tick)
++    {
++        empty_peek_tick = tick;
++        empty_peeks = 0;
++    }
++    if (++empty_peeks >= 8)
++    {
++        const struct timespec delay = { 0, 50000 };
++        empty_peeks = 0;
++        nanosleep( &delay, NULL );
++    }
++    else sched_yield();
++}
++#endif
++
+ /* check for driver events if we detect that the app is not properly consuming messages */
+ static inline void check_for_driver_events(void)
+ {
+@@ -3667,12 +3698,21 @@
+                 params.locks = *(DWORD *)ret_ptr;
+                 params.restore = TRUE;
+             }
++            /* PeekMessage does not return the yield status. Avoid collecting
++             * context-switch counts solely to discard the result. */
++#if defined(__linux__) && defined(__aarch64__) && defined(HAVE_SCHED_YIELD)
++            yield_empty_peek();
++#else
+             NtYieldExecution();
++#endif
+             KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
+         }
+         return FALSE;
+     }
+
++#if defined(__linux__) && defined(__aarch64__) && defined(HAVE_SCHED_YIELD)
++    empty_peeks = 0;
++#endif
+     check_for_driver_events();
+
+     /* copy back our internal safe copy of message data to msg_out.
