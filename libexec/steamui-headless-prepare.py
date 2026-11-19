@@ -3,6 +3,8 @@
 """Bounded isolated compositor/profile/frame preparation; no Steam or seat changes."""
 import argparse,hashlib,importlib.util,json,os,re,secrets,shlex,shutil,stat,struct,subprocess,tarfile,time
 from pathlib import Path
+# The Mesa Vulkan driver library. LEGACY-ASAHI(2027-02-28): libvulkan_asahi is its pre-rename name.
+AURORA_VULKAN_LIBS=('libvulkan_aurora','libvulkan_asahi')
 BASE=Path('/var/tmp/steamui');KIT=BASE/'full-kit71h';UID=1000
 USER=['runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000','DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus']
 def command(argv,timeout=15):
@@ -173,8 +175,8 @@ def execute(args,work=None):
         identity=(j['sway_pid'],j['sway_start'])
         receipt['sway_pid'],receipt['sway_start']=identity;receipt['xwayland_pid']=j['xwayland_pid'];receipt['profile_guard_pass']=True
         maps=Path('/proc',str(identity[0]),'maps').read_text()
-        libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or 'libvulkan_asahi' in line)))
-        if not any('libgallium-' in p for p in libraries) or not any('libvulkan_asahi' in p for p in libraries) or any(not p.startswith('/usr/lib64/') for p in libraries):raise RuntimeError('compositor stock hardware provider maps missing')
+        libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or any(v in line for v in AURORA_VULKAN_LIBS))))
+        if not any('libgallium-' in p for p in libraries) or not any(any(v in p for v in AURORA_VULKAN_LIBS) for p in libraries) or any(not p.startswith('/usr/lib64/') for p in libraries):raise RuntimeError('compositor stock hardware provider maps missing')
         receipt['compositor_provider_sha256']={p:digest(Path(p)) for p in libraries}
         gui={'PATH':'/usr/bin:/bin','HOME':'/home/user','XDG_RUNTIME_DIR':str(j['runtime_dir']),'DBUS_SESSION_BUS_ADDRESS':'unix:path=/run/user/1000/bus','GDK_BACKEND':'wayland'}
         gui.update({k:j[k] for k in ('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY') if j.get(k)})
@@ -236,7 +238,7 @@ def execute(args,work=None):
         postcheck(receipt,'taint_unchanged',lambda:Path('/proc/sys/kernel/tainted').read_text()==before_taint)
         def kernel_check():
             journal=command(['journalctl','-k','--after-cursor='+cursor,'--no-pager']);log=evidence/'kernel.private.log';log.write_text(journal);log.chmod(0o600)
-            errors=[line for line in journal.splitlines() if re.search(r'BUG:|WARNING:|Oops|Call Trace|(?:asahi|apple-dcp|drm).*?(?:fault|error|timeout|failed)',line,re.I)]
+            errors=[line for line in journal.splitlines() if re.search(r'BUG:|WARNING:|Oops|Call Trace|(?:aurora|apple-dcp|drm).*?(?:fault|error|timeout|failed)',line,re.I)]
             receipt['matching_new_kernel_errors']=len(errors)
             return not errors
         postcheck(receipt,'kernel_errors_absent',kernel_check)
