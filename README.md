@@ -13,7 +13,8 @@ Proton, FEX, games) a 4 KiB userspace page size.
 - An Aurora kernel built with `CONFIG_ARM64_USER4K_EXPERIMENTAL=y`
   (aurora-silicon/linux `aurora-edge` and `aurora-wip`).
 - `userpages`, built from `tools/aurora-userpages` in the same kernel tree and
-  installed either on `PATH` or as `/usr/libexec/aurora/userpages`.
+  installed as `/usr/libexec/aurora/userpages` or `/usr/bin/userpages`
+  (where the `aurora-userpages` package puts it).
 - `python3` and `gtk2` (Steam's UI modules link against GTK 2).
 - A working Vulkan driver for the GPU. The wrapper keeps Steam's embedded
   browser on Zink (`MESA_LOADER_DRIVER_OVERRIDE=zink`, `GALLIUM_DRIVER=zink`,
