@@ -26,6 +26,23 @@ AURORA_FEX_GRAPHICS_PROVIDER=${AURORA_FEX_GRAPHICS_PROVIDER:-/usr/share/guestos/
 if [ -z "${STEAM_COMPAT_GRAPHICS_PROVIDER:-}" ] && [ -r "$AURORA_FEX_GRAPHICS_PROVIDER" ]; then
  export STEAM_COMPAT_GRAPHICS_PROVIDER=$AURORA_FEX_GRAPHICS_PROVIDER
 fi
+# steamclient.so, steamui.so and the other client modules link a private libpng
+# 1.6.37 and export its symbols. Steam's bundled SDL3_image loads the host's
+# libpng16.so.16 for the client's PNG images, and calls inside that library then
+# resolve partly to the client's exported copy. The two disagree on png_struct's
+# layout, so the client dies with SIGSEGV in png_create_info_struct before its
+# first window. Preloading the host libpng puts one copy first in the global
+# scope for every caller. AURORA_STEAM_LIBPNG names a different library, and an
+# empty value turns the preload off.
+if [[ ! ${AURORA_STEAM_LIBPNG+x} ]]; then
+ AURORA_STEAM_LIBPNG=
+ for candidate in /usr/lib64/libpng16.so.16 /usr/lib/aarch64-linux-gnu/libpng16.so.16 /usr/lib/libpng16.so.16; do
+  if [ -r "$candidate" ]; then AURORA_STEAM_LIBPNG=$candidate; break; fi
+ done
+fi
+if [ -n "$AURORA_STEAM_LIBPNG" ] && [ -r "$AURORA_STEAM_LIBPNG" ]; then
+ export LD_PRELOAD="$AURORA_STEAM_LIBPNG${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 # The session can retain an older deprecated ICD override after the Steam
 # wrapper selects a newer prefix. Keep one source of Vulkan driver selection
 # for Steam and every runtime child; older loaders use their default catalog.
