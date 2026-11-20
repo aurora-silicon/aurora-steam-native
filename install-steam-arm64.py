@@ -12,11 +12,13 @@ import hashlib
 import os
 import re
 import shutil
+import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -97,12 +99,83 @@ def cached_archive(entry, downloads, snapshot):
     return target
 
 
-def fetch(entry, downloads):
+# A first attempt that averages less than this after SLOW_AFTER seconds is
+# abandoned and the archive is fetched again over IPv4. The socket timeout
+# only catches a connection that stops entirely; a route that trickles (seen
+# on IPv6 at ~100 KB/s against ~7 MB/s over IPv4) would otherwise take hours
+# with no visible progress.
+SLOW_BYTES_PER_SECOND = 256 * 1024
+SLOW_AFTER = 30
+
+
+# Set once an archive needed the IPv4 retry: the rest are fetched over IPv4
+# directly instead of each paying SLOW_AFTER on the same slow route first.
+use_ipv4 = False
+
+
+class TooSlow(OSError):
+    pass
+
+
+class ipv4_only:
+    """Resolve host names to IPv4 addresses only while active."""
+    def __enter__(self):
+        self.original = socket.getaddrinfo
+        def resolve(host, port, family=0, *args, **kwargs):
+            return self.original(host, port, socket.AF_INET, *args, **kwargs)
+        socket.getaddrinfo = resolve
+        return self
+
+    def __exit__(self, *exc):
+        socket.getaddrinfo = self.original
+
+
+def progress(text):
+    print(text, file=sys.stderr, flush=True)
+
+
+def download(url, part, label, size, *, guard_speed):
+    started = time.monotonic()
+    reported = done = 0
+    # read1 returns whatever has arrived, so the speed check runs every few
+    # seconds even on a route that trickles; the guarded attempt also gives up
+    # on a connection that stalls outright within SLOW_AFTER seconds.
+    with urllib.request.urlopen(url, timeout=SLOW_AFTER if guard_speed else 60) as src, \
+            part.open('wb') as dst:
+        while block := src.read1(1 << 16):
+            dst.write(block)
+            done += len(block)
+            elapsed = time.monotonic() - started
+            if guard_speed and elapsed >= SLOW_AFTER and done / elapsed < SLOW_BYTES_PER_SECOND:
+                raise TooSlow(f'{done / elapsed / 1024:.0f} KB/s')
+            if size and done - reported >= max(size // 10, 1 << 20):
+                reported = done
+                progress(f'{label}: {done >> 20} of {size >> 20} MB')
+
+
+def fetch(entry, downloads, index=1, count=1):
+    global use_ipv4
     target = downloads / entry['file']
     if not target.exists():
         part = target.with_name(target.name + '.part')
-        with urllib.request.urlopen(CDN + entry['file'], timeout=60) as src, part.open('wb') as dst:
-            shutil.copyfileobj(src, dst, 1 << 20)
+        size = int(entry.get('size', 0))
+        label = f'[{index}/{count}] {entry["package"]}'
+        progress(f'{label}: downloading {size >> 20} MB' + (' over IPv4' if use_ipv4 else ''))
+        done = False
+        if not use_ipv4:
+            try:
+                download(CDN + entry['file'], part, label, size, guard_speed=True)
+                done = True
+            except OSError as error:
+                progress(f'{label}: {error or type(error).__name__}; retrying over IPv4')
+                use_ipv4 = True
+        if not done:
+            try:
+                with ipv4_only():
+                    download(CDN + entry['file'], part, label, size, guard_speed=False)
+            except OSError as error:
+                part.unlink(missing_ok=True)
+                sys.exit(f'{entry["file"]}: download failed: {error}')
         part.rename(target)
     with target.open('rb') as f:
         digest = hashlib.file_digest(f, 'sha256').hexdigest()
@@ -172,7 +245,8 @@ def install_client(root, downloads, *, offline=False, manifest_path=None, manife
         downloads.mkdir(parents=True, exist_ok=True)
         manifest = urllib.request.urlopen(CDN + MANIFEST, timeout=60).read()
         entries = parse_manifest(manifest.decode())
-        unpack_client(root, manifest, ((entry, fetch(entry, downloads)) for entry in entries))
+        unpack_client(root, manifest, ((entry, fetch(entry, downloads, index, len(entries)))
+                                       for index, entry in enumerate(entries, 1)))
 
 
 def unpack_client(root, manifest, archives):
