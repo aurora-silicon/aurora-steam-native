@@ -2,6 +2,9 @@
 """Offline public CLI contract; fixtures never installed or used as Steam APIs."""
 import json,os,pathlib,shutil,subprocess,tempfile,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
+# The fixed system launcher the entry point must pick on this host: the standard path, or the
+# aurora-userpages package's /usr/bin/userpages when the standard one is absent.
+SYSTEM_HELPER='/usr/bin/userpages' if not os.access('/usr/libexec/aurora/userpages',os.X_OK) and os.access('/usr/bin/userpages',os.X_OK) else '/usr/libexec/aurora/userpages'
 class Routing(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.home=pathlib.Path(self.temp.name);self.client=self.home/'client with spaces';(self.client/'steamrtarm64').mkdir(parents=True);(self.client/'steamrtarm64/steam').write_text('not executed offline fixture');(self.client/'steamrtarm64/steam').chmod(0o755);(self.home/'.steam').mkdir();(self.home/'.steam/root').symlink_to(self.client)
@@ -10,7 +13,12 @@ class Routing(unittest.TestCase):
  def env(self,**extra):
   e={k:v for k,v in os.environ.items() if k not in ('AURORA_USERPAGES_LAUNCHER','AURORA_STEAM_ROOT','AURORA_STEAM_LIBEXEC')};e.update(HOME=str(self.home),AURORA_STEAM_LIBEXEC=str(self.record),**extra);return e
  def test_default_standard_and_current_root(self):
-  r=subprocess.run([str(ROOT/'bin/steam-native4k'),'steam://open/games','arg with spaces'],env=self.env(),capture_output=True,text=True,check=True);d=json.loads(r.stdout);self.assertEqual(d['helper'],'/usr/libexec/aurora/userpages');self.assertEqual(d['root'],str(self.client.resolve()));self.assertEqual(d['args'],['steam://open/games','arg with spaces'])
+  r=subprocess.run([str(ROOT/'bin/steam-native4k'),'steam://open/games','arg with spaces'],env=self.env(),capture_output=True,text=True,check=True);d=json.loads(r.stdout);self.assertEqual(d['helper'],SYSTEM_HELPER);self.assertEqual(d['root'],str(self.client.resolve()));self.assertEqual(d['args'],['steam://open/games','arg with spaces'])
+ def test_path_userpages_never_replaces_system_helper(self):
+  # A home-local copy first on PATH must not be selected; only the fixed system paths are.
+  bindir=self.home/'bin';bindir.mkdir();fake=bindir/'userpages';fake.write_text('#!/bin/sh\n');fake.chmod(0o755)
+  e=self.env();e['PATH']=str(bindir)+os.pathsep+e['PATH']
+  r=subprocess.run([str(ROOT/'bin/steam-native4k')],env=e,capture_output=True,text=True,check=True);self.assertEqual(json.loads(r.stdout)['helper'],SYSTEM_HELPER)
  def test_explicit_reviewed_override(self):
   r=subprocess.run([str(ROOT/'bin/steam-native4k')],env=self.env(AURORA_USERPAGES_LAUNCHER='/reviewed/helper'),capture_output=True,text=True,check=True);self.assertEqual(json.loads(r.stdout)['helper'],'/reviewed/helper')
  def test_direct_loop_exports_shell_local_selection(self):
