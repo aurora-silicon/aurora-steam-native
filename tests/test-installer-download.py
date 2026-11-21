@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Online archive download: progress, and the IPv4 retry for slow or failed routes. No network."""
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -95,11 +96,54 @@ class DownloadTest(unittest.TestCase):
             target, _ = self.fetch()
         self.assertEqual(target.read_bytes(), PAYLOAD)
 
-    def test_failed_ipv4_attempt_exits_and_leaves_no_partial_file(self):
-        with self.opened(urllib.error.URLError('down'), urllib.error.URLError('down')), \
+    def test_failed_ipv4_and_default_attempts_exit_and_leave_no_partial_file(self):
+        with self.opened(urllib.error.URLError('down'), urllib.error.URLError('down'),
+                         urllib.error.URLError('down')), \
                 self.assertRaises(SystemExit) as raised:
             self.fetch()
         self.assertIn('download failed', str(raised.exception))
+        self.assertEqual(list(self.downloads.iterdir()), [])
+        self.assertEqual(self.families, [False, True, False])
+
+    def test_ipv4_failure_falls_back_to_the_default_route_without_the_floor(self):
+        # IPv6-only (NAT64) network: the default route trickles, IPv4 does not resolve.
+        clock = iter(range(0, 100000, 20))
+        no_ipv4 = urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, 'Name or service not known'))
+        with mock.patch.object(installer.time, 'monotonic', side_effect=lambda: next(clock)), \
+                self.opened(Response(), no_ipv4, Response()):
+            target, log = self.fetch()
+        self.assertEqual(target.read_bytes(), PAYLOAD)
+        self.assertIn('retrying on the default route', log)
+        self.assertEqual(self.families, [False, True, False])
+
+    def test_ipv4_is_kept_for_later_archives_only_after_it_worked(self):
+        second = dict(self.entry, package='bins_next', file='bins_next.zip.0')
+        with self.opened(urllib.error.URLError('timed out'), urllib.error.URLError('no route'), Response(),
+                         Response()):
+            self.fetch()
+            target, log = self.fetch(second)
+        self.assertEqual(target.read_bytes(), PAYLOAD)
+        self.assertNotIn('over IPv4', log)
+        self.assertEqual(self.families, [False, True, False, False])
+
+    def test_http_error_is_not_retried_over_ipv4(self):
+        not_found = urllib.error.HTTPError(installer.CDN + 'x', 404, 'Not Found', {}, None)
+        with self.opened(not_found), self.assertRaises(SystemExit) as raised:
+            self.fetch()
+        self.assertIn('download failed', str(raised.exception))
+        self.assertEqual(self.families, [False])
+        self.assertFalse(installer.use_ipv4)
+        self.assertEqual(list(self.downloads.iterdir()), [])
+
+    def test_local_write_error_is_not_retried_over_ipv4(self):
+        class Full(Response):
+            def read1(self, n=-1):
+                raise OSError(errno.ENOSPC, 'No space left on device')
+        with self.opened(Full()), self.assertRaises(SystemExit) as raised:
+            self.fetch()
+        self.assertIn('No space left', str(raised.exception))
+        self.assertEqual(self.families, [False])
+        self.assertFalse(installer.use_ipv4)
         self.assertEqual(list(self.downloads.iterdir()), [])
 
     def test_ipv4_only_resolves_inet_and_restores_the_resolver(self):

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -108,13 +109,23 @@ SLOW_BYTES_PER_SECOND = 256 * 1024
 SLOW_AFTER = 30
 
 
-# Set once an archive needed the IPv4 retry: the rest are fetched over IPv4
-# directly instead of each paying SLOW_AFTER on the same slow route first.
+# Set once an archive downloaded over IPv4 after the default route failed: the
+# rest are fetched over IPv4 directly instead of each paying SLOW_AFTER on the
+# same slow route first.
 use_ipv4 = False
 
 
 class TooSlow(OSError):
     pass
+
+
+def route_error(error):
+    """A failure the route can explain: name resolution, connect, a stalled,
+    reset or trickling transfer. HTTP status errors (a 404 or 5xx from the CDN)
+    and local errors (ENOSPC writing the .part file) are not."""
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    return isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, TooSlow))
 
 
 class ipv4_only:
@@ -161,21 +172,36 @@ def fetch(entry, downloads, index=1, count=1):
         size = int(entry.get('size', 0))
         label = f'[{index}/{count}] {entry["package"]}'
         progress(f'{label}: downloading {size >> 20} MB' + (' over IPv4' if use_ipv4 else ''))
-        done = False
-        if not use_ipv4:
-            try:
-                download(CDN + entry['file'], part, label, size, guard_speed=True)
-                done = True
-            except OSError as error:
-                progress(f'{label}: {error or type(error).__name__}; retrying over IPv4')
-                use_ipv4 = True
-        if not done:
-            try:
-                with ipv4_only():
-                    download(CDN + entry['file'], part, label, size, guard_speed=False)
-            except OSError as error:
-                part.unlink(missing_ok=True)
-                sys.exit(f'{entry["file"]}: download failed: {error}')
+        url = CDN + entry['file']
+        try:
+            done = False
+            if not use_ipv4:
+                try:
+                    download(url, part, label, size, guard_speed=True)
+                    done = True
+                except OSError as error:
+                    if not route_error(error):
+                        raise
+                    progress(f'{label}: {error or type(error).__name__}; retrying over IPv4')
+            if not done:
+                try:
+                    with ipv4_only():
+                        download(url, part, label, size, guard_speed=False)
+                    done = use_ipv4 = True
+                except OSError as error:
+                    if not route_error(error):
+                        raise
+                    # IPv4 may not resolve or route at all (IPv6-only or NAT64
+                    # networks): go back to the default route once, with no
+                    # speed floor, as before the IPv4 retry existed.
+                    use_ipv4 = False
+                    progress(f'{label}: IPv4: {error or type(error).__name__}; '
+                             'retrying on the default route without the speed check')
+            if not done:
+                download(url, part, label, size, guard_speed=False)
+        except OSError as error:
+            part.unlink(missing_ok=True)
+            sys.exit(f'{entry["file"]}: download failed: {error}')
         part.rename(target)
     with target.open('rb') as f:
         digest = hashlib.file_digest(f, 'sha256').hexdigest()
