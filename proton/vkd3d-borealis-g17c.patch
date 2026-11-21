@@ -2,18 +2,21 @@ diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
 index b194188..4f8a384 100644
 --- a/libs/vkd3d/command.c
 +++ b/libs/vkd3d/command.c
-@@ -25572,9 +25572,23 @@ static void d3d12_command_queue_wait_staggered_submission(struct d3d12_command_q
+@@ -25572,9 +25572,26 @@ static void d3d12_command_queue_wait_staggered_submission(struct d3d12_command_q
      VkResult vr;
  
 +    uint64_t value = command_queue->last_submission_timeline_value;
 +
 +    if (d3d12_device_uses_borealis_g17c_queue_policy(command_queue->device))
 +    {
-+        /* Let the other queue submit while two chunks from this queue are
-+         * in flight. Keep the history on the logical queue, since values
-+         * from other queues may interleave on the Vulkan timeline. */
-+        uint64_t previous = command_queue->stagger_previous_value;
-+        command_queue->stagger_previous_value = value;
++        /* Allow ten staggered chunks in flight per logical queue so the GPU
++         * stays fed while keeping bounded submission latency. Keep the history
++         * on the logical queue, since values from other queues may interleave
++         * on the Vulkan timeline. */
++        uint32_t idx = command_queue->stagger_history_index;
++        uint64_t previous = command_queue->stagger_history[idx];
++        command_queue->stagger_history[idx] = value;
++        command_queue->stagger_history_index = (idx + 1) % ARRAY_SIZE(command_queue->stagger_history);
 +        if (!previous)
 +            return;
 +        value = previous;
@@ -27,10 +30,11 @@ index b194188..4f8a384 100644
 +    wait_info.pValues = &value;
  
      if ((vr = VK_CALL(vkWaitSemaphores(command_queue->device->vk_device, &wait_info, UINT64_MAX))))
-@@ -25706,4 +25720,5 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
+@@ -25706,4 +25723,6 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
      if (command_queue->stagger_submissions != stagger_submissions)
      {
-+        command_queue->stagger_previous_value = 0;
++        memset(command_queue->stagger_history, 0, sizeof(command_queue->stagger_history));
++        command_queue->stagger_history_index = 0;
          command_queue->stagger_submissions = stagger_submissions;
          INFO("%sabling staggered submissions for command queue %p, queue family %u.\n",
 diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
@@ -91,10 +95,11 @@ diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
 index e63dc7b..d22fdf7 100644
 --- a/libs/vkd3d/vkd3d_private.h
 +++ b/libs/vkd3d/vkd3d_private.h
-@@ -3939,4 +3939,5 @@ struct d3d12_command_queue
+@@ -3939,4 +3939,6 @@ struct d3d12_command_queue
      uint64_t last_submission_timeline_value;
      UINT64 last_submission_time_ns;
-+    uint64_t stagger_previous_value;
++    uint64_t stagger_history[9];
++    uint32_t stagger_history_index;
      bool stagger_submissions;
  
 @@ -7276,4 +7277,5 @@ bool vkd3d_application_has_broken_wave128(void);
