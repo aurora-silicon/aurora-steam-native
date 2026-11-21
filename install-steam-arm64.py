@@ -113,6 +113,11 @@ SLOW_AFTER = 30
 # rest are fetched over IPv4 directly instead of each paying SLOW_AFTER on the
 # same slow route first.
 use_ipv4 = False
+# Set once the IPv4 attempt failed on a route error (no IPv4 route or address,
+# as on an IPv6-only network): the rest are fetched on the default route with
+# no speed floor directly, instead of each paying SLOW_AFTER and the IPv4
+# attempt again first.
+no_ipv4 = False
 
 
 class TooSlow(OSError):
@@ -165,7 +170,7 @@ def download(url, part, label, size, *, guard_speed):
 
 
 def fetch(entry, downloads, index=1, count=1):
-    global use_ipv4
+    global use_ipv4, no_ipv4
     target = downloads / entry['file']
     if not target.exists():
         part = target.with_name(target.name + '.part')
@@ -175,7 +180,7 @@ def fetch(entry, downloads, index=1, count=1):
         url = CDN + entry['file']
         try:
             done = False
-            if not use_ipv4:
+            if not use_ipv4 and not no_ipv4:
                 try:
                     download(url, part, label, size, guard_speed=True)
                     done = True
@@ -183,7 +188,7 @@ def fetch(entry, downloads, index=1, count=1):
                     if not route_error(error):
                         raise
                     progress(f'{label}: {error or type(error).__name__}; retrying over IPv4')
-            if not done:
+            if not done and not no_ipv4:
                 try:
                     with ipv4_only():
                         download(url, part, label, size, guard_speed=False)
@@ -193,8 +198,10 @@ def fetch(entry, downloads, index=1, count=1):
                         raise
                     # IPv4 may not resolve or route at all (IPv6-only or NAT64
                     # networks): go back to the default route once, with no
-                    # speed floor, as before the IPv4 retry existed.
+                    # speed floor, as before the IPv4 retry existed. The rest
+                    # of the archives go there directly.
                     use_ipv4 = False
+                    no_ipv4 = True
                     progress(f'{label}: IPv4: {error or type(error).__name__}; '
                              'retrying on the default route without the speed check')
             if not done:

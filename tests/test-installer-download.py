@@ -36,6 +36,7 @@ class DownloadTest(unittest.TestCase):
                       'sha2': hashlib.sha256(PAYLOAD).hexdigest()}
         self.families = []
         installer.use_ipv4 = False
+        installer.no_ipv4 = False
 
     def opened(self, *responses):
         """urlopen stand-in: records whether each call ran under ipv4_only, then answers in order."""
@@ -124,6 +125,20 @@ class DownloadTest(unittest.TestCase):
             target, log = self.fetch(second)
         self.assertEqual(target.read_bytes(), PAYLOAD)
         self.assertNotIn('over IPv4', log)
+        self.assertEqual(self.families, [False, True, False, False])
+
+    def test_after_ipv4_failed_later_archives_skip_the_speed_check_and_ipv4(self):
+        # IPv6-only network with a slow route: the second archive is not abandoned at
+        # SLOW_AFTER and IPv4 is not tried again; it is fetched once on the default route.
+        second = dict(self.entry, package='bins_next', file='bins_next.zip.0')
+        clock = iter(range(0, 100000, 20))
+        no_ipv4 = urllib.error.URLError(OSError(113, 'No route to host'))
+        with mock.patch.object(installer.time, 'monotonic', side_effect=lambda: next(clock)), \
+                self.opened(Response(), no_ipv4, Response(), Response()):
+            self.fetch()
+            target, log = self.fetch(second)
+        self.assertEqual(target.read_bytes(), PAYLOAD)
+        self.assertNotIn('retrying', log)
         self.assertEqual(self.families, [False, True, False, False])
 
     def test_http_error_is_not_retried_over_ipv4(self):
