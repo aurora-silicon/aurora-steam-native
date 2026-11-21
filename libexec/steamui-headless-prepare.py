@@ -5,6 +5,9 @@ import argparse,hashlib,importlib.util,json,os,re,secrets,shlex,shutil,stat,stru
 from pathlib import Path
 BASE=Path('/var/tmp/steamui');KIT=BASE/'full-kit71h';UID=1000
 USER=['runuser','-u','user','--','env','XDG_RUNTIME_DIR=/run/user/1000','DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus']
+# The native Vulkan driver's library: libvulkan_borealis.so since aurora-silicon/mesa#591,
+# libvulkan_asahi.so on systems with an older Mesa.
+VULKAN=('libvulkan_borealis','libvulkan_asahi')
 def command(argv,timeout=15):
     return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=timeout).stdout.strip()
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -173,8 +176,8 @@ def execute(args,work=None):
         identity=(j['sway_pid'],j['sway_start'])
         receipt['sway_pid'],receipt['sway_start']=identity;receipt['xwayland_pid']=j['xwayland_pid'];receipt['profile_guard_pass']=True
         maps=Path('/proc',str(identity[0]),'maps').read_text()
-        libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or 'libvulkan_asahi' in line)))
-        if not any('libgallium-' in p for p in libraries) or not any('libvulkan_asahi' in p for p in libraries) or any(not p.startswith('/usr/lib64/') for p in libraries):raise RuntimeError('compositor stock hardware provider maps missing')
+        libraries=sorted(set(line.split()[-1] for line in maps.splitlines() if len(line.split())>=6 and ('libgallium-' in line or any(v in line for v in VULKAN))))
+        if not any('libgallium-' in p for p in libraries) or not any(v in p for p in libraries for v in VULKAN) or any(not p.startswith('/usr/lib64/') for p in libraries):raise RuntimeError('compositor stock hardware provider maps missing')
         receipt['compositor_provider_sha256']={p:digest(Path(p)) for p in libraries}
         gui={'PATH':'/usr/bin:/bin','HOME':'/home/user','XDG_RUNTIME_DIR':str(j['runtime_dir']),'DBUS_SESSION_BUS_ADDRESS':'unix:path=/run/user/1000/bus','GDK_BACKEND':'wayland'}
         gui.update({k:j[k] for k in ('DISPLAY','XAUTHORITY','WAYLAND_DISPLAY') if j.get(k)})
