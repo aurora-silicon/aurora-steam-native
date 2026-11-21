@@ -18,20 +18,29 @@ class LaunchEnvironment(unittest.TestCase):
             root = Path(directory)
             steam = root / "steam/steamrtarm64/steam"
             steam.parent.mkdir(parents=True)
-            steam.write_text("#!/bin/sh\nexit 0\n"); steam.chmod(0o755)
             report = root / "report"
-            # Stands in for userpages: record what Steam would inherit, then stop.
+            # Stands in for the client: record the preload it starts with.
+            steam.write_text("#!/bin/sh\necho \"preload=${LD_PRELOAD-<unset>}\" >> \"$REPORT\"\n")
+            steam.chmod(0o755)
+            # Stands in for userpages: record what the loop exported, then run the restart
+            # loop it was given (without the page-size argument), as userpages does.
             launcher = root / "userpages"
             launcher.write_text("#!/bin/bash\n{ echo \"nofile=$(ulimit -Sn) $(ulimit -Hn)\";"
                                 " echo \"provider=${STEAM_COMPAT_GRAPHICS_PROVIDER-<unset>}\";"
                                 " echo \"launcher=${AURORA_USERPAGES_LAUNCHER-<unset>}\";"
-                                " echo \"preload=${LD_PRELOAD-<unset>}\"; } > \"$REPORT\"\n")
+                                " echo \"launcher_preload=${LD_PRELOAD-<unset>}\"; } > \"$REPORT\"\n"
+                                "shift\nexec \"$@\"\n")
             launcher.chmod(0o755)
+            # The loop checks that the client is an AArch64 ELF with python3; the stand-in
+            # client is a script, so a python3 on PATH records its preload and accepts it.
+            tools = root / "tools"; tools.mkdir()
+            (tools / "python3").write_text("#!/bin/sh\necho \"check_preload=${LD_PRELOAD-<unset>}\" >> \"$REPORT\"\n")
+            (tools / "python3").chmod(0o755)
             provider = root / "aurora-fex-mesa/graphics_provider.json"
             if provider_exists:
                 provider.parent.mkdir()
                 provider.write_text("{}\n")
-            env = {"PATH": os.environ["PATH"], "HOME": str(root), "REPORT": str(report),
+            env = {"PATH": str(tools) + os.pathsep + os.environ["PATH"], "HOME": str(root), "REPORT": str(report),
                    "AURORA_STEAM_ROOT": str(root / "steam"), "AURORA_USERPAGES_LAUNCHER": str(launcher),
                    "AURORA_FEX_GRAPHICS_PROVIDER": str(provider),
                    "AURORA_STEAM_CONSOLE_LOG": str(root / "console.log")}
@@ -89,6 +98,12 @@ class LaunchEnvironment(unittest.TestCase):
         # The client's exported private libpng must not mix with the host copy SDL3_image loads.
         values, _, _, libpng = self.run_loop(libpng="fake")
         self.assertEqual(values["preload"], libpng)
+
+    def test_libpng_preload_is_given_to_the_client_alone(self):
+        # The launcher and the checks before the client run without it.
+        values, _, _, _ = self.run_loop(libpng="fake")
+        self.assertEqual(values["launcher_preload"], "<unset>")
+        self.assertEqual(values["check_preload"], "<unset>")
 
     def test_libpng_preload_keeps_the_callers_preload(self):
         values, _, _, libpng = self.run_loop(libpng="fake", caller_preload="/opt/other.so")

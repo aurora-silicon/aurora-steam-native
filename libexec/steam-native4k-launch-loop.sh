@@ -33,7 +33,9 @@ fi
 # layout, so the client dies with SIGSEGV in png_create_info_struct before its
 # first window. Preloading the host libpng puts one copy first in the global
 # scope for every caller. AURORA_STEAM_LIBPNG names a different library, and an
-# empty value turns the preload off.
+# empty value turns the preload off. The preload goes on the client's command
+# alone (below): the userpages launcher and the checks before each start run
+# without it.
 if [[ ! ${AURORA_STEAM_LIBPNG+x} ]]; then
  AURORA_STEAM_LIBPNG=
  for candidate in /usr/lib64/libpng16.so.16 /usr/lib/aarch64-linux-gnu/libpng16.so.16 /usr/lib/libpng16.so.16; do
@@ -41,7 +43,9 @@ if [[ ! ${AURORA_STEAM_LIBPNG+x} ]]; then
  done
 fi
 if [ -n "$AURORA_STEAM_LIBPNG" ] && [ -r "$AURORA_STEAM_LIBPNG" ]; then
- export LD_PRELOAD="$AURORA_STEAM_LIBPNG${LD_PRELOAD:+:$LD_PRELOAD}"
+ export AURORA_STEAM_CLIENT_PRELOAD="$AURORA_STEAM_LIBPNG${LD_PRELOAD:+:$LD_PRELOAD}"
+else
+ unset AURORA_STEAM_CLIENT_PRELOAD
 fi
 # The session can retain an older deprecated ICD override after the Steam
 # wrapper selects a newer prefix. Keep one source of Vulkan driver selection
@@ -65,6 +69,16 @@ exec "$AURORA_USERPAGES_LAUNCHER" 4k /bin/bash -c '
  cd "$AURORA_STEAM_ROOT"
  export LD_LIBRARY_PATH="$AURORA_STEAM_ROOT/steamrtarm64:$AURORA_STEAM_ROOT/steamrtarm64/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
  unset STEAM_RUNTIME STEAM_RUNTIME_LIBRARY_PATH
+ AURORA_CLIENT_PRELOAD_SET=${AURORA_STEAM_CLIENT_PRELOAD+x}
+ AURORA_CLIENT_PRELOAD=${AURORA_STEAM_CLIENT_PRELOAD-}
+ unset AURORA_STEAM_CLIENT_PRELOAD
+ aurora_client() {
+  if [ -n "$AURORA_CLIENT_PRELOAD_SET" ]; then
+   LD_PRELOAD=$AURORA_CLIENT_PRELOAD "$AURORA_NATIVE_BINARY" "$@"
+  else
+   "$AURORA_NATIVE_BINARY" "$@"
+  fi
+ }
  AURORA_RESTARTS=0
  AURORA_RESTART_LIMIT=${AURORA_STEAM_RESTART_LIMIT:-8}
  [[ "$AURORA_RESTART_LIMIT" =~ ^[0-9]+$ ]] || { echo "Invalid restart limit" >&2; exit 2; }
@@ -75,7 +89,7 @@ exec "$AURORA_USERPAGES_LAUNCHER" 4k /bin/bash -c '
   python3 -c "import pathlib,struct,sys; d=pathlib.Path(sys.argv[1]).open(\"rb\").read(20); assert d[:4]==b\"\\x7fELF\" and d[4:6]==bytes([2,1]) and struct.unpack_from(\"<H\",d,18)[0]==183, \"Steam entry is not ELF64 little-endian AArch64\"" "$AURORA_NATIVE_BINARY"
   printf "Aurora native Steam parent_pid=%s pages=4096 requested_restarts=%s\n" "$$" "$AURORA_RESTARTS" >&2
   sha256sum "$AURORA_NATIVE_BINARY" >&2
-  if "$AURORA_NATIVE_BINARY" -beta publicbeta "$@"; then
+  if aurora_client -beta publicbeta "$@"; then
    AURORA_STATUS=0
   else
    AURORA_STATUS=$?
