@@ -1,0 +1,104 @@
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index 39e4b0b..786a775 100644
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -5942,6 +5942,15 @@ static void d3d12_descriptor_heap_write_null_descriptor_template_embedded(struct
+     }
+ }
+ 
++/* A null write clears all sibling sets. Choose a null type legal for each layout. */
++static VkDescriptorType d3d12_compatible_null_type(uint32_t allowed,
++        VkDescriptorType fallback, VkDescriptorType requested)
++{
++    if ((unsigned int)requested < 32 && (allowed & (1u << requested)))
++        return requested;
++    return fallback;
++}
++
+ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descriptor_va_t desc_va,
+         VkDescriptorType vk_mutable_descriptor_type)
+ {
+@@ -5988,7 +5997,9 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
+             dst += offset * null_descriptor_template->writes.payloads[i].desc_size;
+             src = null_descriptor_template->writes.payloads[i].src_payload;
+             if (!src)
+-                src = vkd3d_bindless_state_get_null_descriptor_payload(bindless_state, vk_mutable_descriptor_type);
++                src = vkd3d_bindless_state_get_null_descriptor_payload(bindless_state,
++                        d3d12_compatible_null_type(null_descriptor_template->mutable_type_masks[i],
++                                null_descriptor_template->mutable_fallback_types[i], vk_mutable_descriptor_type));
+             memcpy(dst, src, null_descriptor_template->writes.payloads[i].desc_size);
+         }
+     }
+@@ -6000,7 +6011,9 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
+         {
+             writes[i] = null_descriptor_template->writes.descriptors.writes[i];
+             if (writes[i].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT)
+-                writes[i].descriptorType = vk_mutable_descriptor_type;
++                writes[i].descriptorType = d3d12_compatible_null_type(
++                        null_descriptor_template->mutable_type_masks[i],
++                        null_descriptor_template->mutable_fallback_types[i], vk_mutable_descriptor_type);
+             writes[i].dstArrayElement = offset;
+         }
+ 
+@@ -9520,7 +9533,7 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_buffer(struct d3d12_descr
+                 src_null_payloads[set_count] = vkd3d_bindless_state_get_null_descriptor_payload(
+                         &device->bindless_state,
+                         set_info->vk_descriptor_type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT ?
+-                                VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : set_info->vk_descriptor_type);
++                                set_info->vk_init_null_descriptor_type : set_info->vk_descriptor_type);
+             }
+ 
+             src_null_payload_sizes[set_count] = set_info->host_mapping_descriptor_size;
+@@ -10198,6 +10211,18 @@ static HRESULT d3d12_descriptor_heap_init_legacy(struct d3d12_descriptor_heap *d
+                 if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+                         !d3d12_device_use_embedded_mutable_descriptors(device))
+                 {
++                    if (set_info->vk_descriptor_type == VK_DESCRIPTOR_TYPE_MUTABLE_EXT)
++                    {
++                        struct d3d12_null_descriptor_template *tmpl = &descriptor_heap->null_descriptor_template;
++                        VkDescriptorType types[VKD3D_MAX_MUTABLE_DESCRIPTOR_TYPES];
++                        unsigned int count, j;
++
++                        count = vkd3d_bindless_build_mutable_type_list(types, device->bindless_state.flags, set_info->flags);
++                        for (j = 0; j < count; j++)
++                            tmpl->mutable_type_masks[tmpl->num_writes] |= 1u << types[j];
++                        tmpl->mutable_fallback_types[tmpl->num_writes] = set_info->vk_init_null_descriptor_type;
++                    }
++
+                     if (d3d12_device_uses_descriptor_buffers(device))
+                         d3d12_descriptor_heap_add_null_descriptor_template_buffers(descriptor_heap, set_info, i);
+                     else
+diff --git a/libs/vkd3d/state.c b/libs/vkd3d/state.c
+index b640fb7..72c619d 100644
+--- a/libs/vkd3d/state.c
++++ b/libs/vkd3d/state.c
+@@ -7207,7 +7207,7 @@ static uint32_t d3d12_max_host_descriptor_count_from_heap_type(struct d3d12_devi
+     }
+ }
+ 
+-static uint32_t vkd3d_bindless_build_mutable_type_list(VkDescriptorType *list, uint32_t bindless_flags, uint32_t set_flags)
++uint32_t vkd3d_bindless_build_mutable_type_list(VkDescriptorType *list, uint32_t bindless_flags, uint32_t set_flags)
+ {
+     uint32_t count = 0;
+ 
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index e63dc7b..8fad162 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -1627,6 +1627,8 @@ struct d3d12_null_descriptor_template
+         } descriptors;
+     } writes;
+ 
++    uint32_t mutable_type_masks[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
++    VkDescriptorType mutable_fallback_types[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
+     unsigned int num_writes;
+     unsigned int set_info_mask;
+     bool has_mutable_descriptors;
+@@ -6259,6 +6261,7 @@ static inline unsigned int d3d12_device_get_descriptor_handle_increment_size(
+     }
+ }
+ 
++uint32_t vkd3d_bindless_build_mutable_type_list(VkDescriptorType *list, uint32_t bindless_flags, uint32_t set_flags);
+ uint32_t vkd3d_bindless_get_mutable_descriptor_type_size(struct d3d12_device *device);
+ bool vkd3d_bindless_supports_embedded_mutable_type(struct d3d12_device *device, uint32_t flags);
+ 
