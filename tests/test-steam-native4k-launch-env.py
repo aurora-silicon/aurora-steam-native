@@ -4,6 +4,7 @@ userpages launcher and the host libpng preload."""
 import os
 from pathlib import Path
 import resource
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -36,6 +37,12 @@ class LaunchEnvironment(unittest.TestCase):
             tools = root / "tools"; tools.mkdir()
             (tools / "python3").write_text("#!/bin/sh\necho \"check_preload=${LD_PRELOAD-<unset>}\" >> \"$REPORT\"\n")
             (tools / "python3").chmod(0o755)
+            # The stand-in userpages does not change the page size, so on a 16 KiB host the
+            # loop's 4K check would fail: report 4096, as it reads under the real `userpages 4k`.
+            getconf = shutil.which("getconf") or "/usr/bin/getconf"
+            (tools / "getconf").write_text("#!/bin/sh\ncase \"$1\" in PAGE_SIZE|PAGESIZE) echo 4096;;"
+                                           f" *) exec {getconf} \"$@\";; esac\n")
+            (tools / "getconf").chmod(0o755)
             provider = root / "aurora-fex-mesa/graphics_provider.json"
             if provider_exists:
                 provider.parent.mkdir()
