@@ -1,0 +1,29 @@
+From: Jonathan Goyvaerts <jonathan.goyvaerts@gmail.com>
+Subject: [PATCH] ntdll: Pass the right exception record from the ARM64EC x64 KiUserExceptionDispatcher.
+
+License: LGPL-2.1-or-later, matching dlls/ntdll/signal_x86_64.c.
+That file carries Copyright 1999, 2005 Alexandre Julliard.
+
+Since fc0d79cf5b ("ntdll: Support xstate in ARM64EC exception dispatcher")
+the ARM64EC dispatcher frame holds a struct xcontext (0x670 bytes) instead
+of a bare ARM64EC_NT_CONTEXT (0x4d0 bytes), and the exception record sits
+at sp + 0x670 + 0x3b0. The x64 KiUserExceptionDispatcher entry still
+pointed at sp + 0x4d0 + 0x3b0, so Wow64PrepareForException, and x64 code
+that hooks KiUserExceptionDispatcher and reads the record offset from it,
+got a pointer into the ARM64 context instead of the record.
+
+Signed-off-by: Jonathan Goyvaerts <jonathan.goyvaerts@gmail.com>
+
+diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
+index 1105e3d5..3e4410fa 100644
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -83,7 +83,7 @@ __ASM_GLOBAL_FUNC( "EXP+#KiUserExceptionDispatcher",
+                    "test %rax,%rax\n\t"
+                    "jz 1f\n\t"
+                    "subq $0x28,%rsp\n\t"
+-                   "leaq 0x30+0x3b0+0x4d0(%rsp),%rcx\n\t" /* rec */
++                   "leaq 0x30+0x3b0+0x670(%rsp),%rcx\n\t" /* rec, after sizeof(struct xcontext) in signal_arm64ec.c */
+                    "leaq 0x30(%rsp),%rdx\n\t"             /* context */
+                    "call *%rax\n"
+                    "addq $0x28,%rsp\n"
