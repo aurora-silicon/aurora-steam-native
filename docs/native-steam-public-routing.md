@@ -1,6 +1,6 @@
 # Native Steam launcher routing
 
-The public native Steam entry point and restart loop use `/usr/libexec/aurora/userpages` by default. They preserve an explicit `AURORA_USERPAGES_LAUNCHER` override, including a reviewed test launcher. A home-local or PATH-selected older binary cannot silently replace the standard default.
+The public native Steam entry point (`bin/steam-native4k`) uses `/usr/libexec/aurora/userpages` by default. When that file is absent it takes `/usr/bin/userpages`, where the `aurora-userpages` package installs it. Both are fixed system paths, so a home-local or PATH-selected older binary cannot silently replace them. The entry point exports its choice to the restart loop. The restart loop started directly, with no `AURORA_USERPAGES_LAUNCHER`, takes the first `userpages` on PATH, or `/usr/libexec/aurora/userpages` when PATH has none. Both preserve an explicit `AURORA_USERPAGES_LAUNCHER` override, including a reviewed test launcher.
 
 To update an existing install without changing its client, aliases, SDK or settings, install the exact published `bin/steam-native4k` and `libexec/steam-native4k-launch-loop.sh` at the corresponding prefix paths. Preserve the prior files with their SHA, ownership, mode and timestamps before replacement. The entry point resolves the existing `~/.steam/root` unless a caller explicitly supplies `AURORA_STEAM_ROOT`; the loop resides at the prefix's `libexec/steam-native4k-launch-loop.sh`.
 
