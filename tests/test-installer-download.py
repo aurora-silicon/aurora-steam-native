@@ -117,6 +117,22 @@ class DownloadTest(unittest.TestCase):
         self.assertIn('retrying on the default route', log)
         self.assertEqual(self.families, [False, True, False])
 
+    def test_cut_transfer_is_retried_over_ipv4(self):
+        with self.opened(Response(PAYLOAD[:1 << 20]), Response()):
+            target, log = self.fetch()
+        self.assertEqual(target.read_bytes(), PAYLOAD)
+        self.assertIn('connection closed after 1048576 of 4194304 bytes; retrying over IPv4', log)
+        self.assertEqual(self.families, [False, True])
+
+    def test_cut_transfer_everywhere_is_a_download_failure(self):
+        cut = PAYLOAD[:1 << 20]
+        with self.opened(Response(cut), Response(cut), Response(cut)), \
+                self.assertRaises(SystemExit) as raised:
+            self.fetch()
+        self.assertIn('download failed: connection closed after', str(raised.exception))
+        self.assertNotIn('SHA-256', str(raised.exception))
+        self.assertEqual(list(self.downloads.iterdir()), [])
+
     def test_ipv4_is_kept_for_later_archives_only_after_it_worked(self):
         second = dict(self.entry, package='bins_next', file='bins_next.zip.0')
         with self.opened(urllib.error.URLError('timed out'), urllib.error.URLError('no route'), Response(),
