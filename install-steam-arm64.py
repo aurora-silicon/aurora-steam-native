@@ -167,6 +167,11 @@ def download(url, part, label, size, *, guard_speed):
             if size and done - reported >= max(size // 10, 1 << 20):
                 reported = done
                 progress(f'{label}: {done >> 20} of {size >> 20} MB')
+    # read1 returns b'' when the server closes before Content-Length is
+    # reached (http.client raises no IncompleteRead there): a cut transfer is a
+    # route failure like a reset, not a file that fails its digest.
+    if size and done < size:
+        raise ConnectionError(f'connection closed after {done} of {size} bytes')
 
 
 def fetch(entry, downloads, index=1, count=1):
