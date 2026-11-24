@@ -1,0 +1,180 @@
+diff --git a/libs/vkd3d/command.c b/libs/vkd3d/command.c
+index b194188..59caa1e 100644
+--- a/libs/vkd3d/command.c
++++ b/libs/vkd3d/command.c
+@@ -25572,9 +25572,29 @@ static void d3d12_command_queue_wait_staggered_submission(struct d3d12_command_q
+     VkResult vr;
+ 
++    uint64_t value = command_queue->last_submission_timeline_value;
++
++    if (d3d12_device_uses_borealis_queue_policy(command_queue->device) &&
++            !command_queue->stagger_yields_to_priority)
++    {
++        /* Graphics and non-graphics queues share this Vulkan queue, which
++         * the Borealis single queue guarantees. Keep two chunks from this
++         * logical queue in flight instead of one, so that the GPU does not
++         * go idle while the host waits and submits the next chunk. A queue
++         * that staggers to let a higher-priority queue's work in sooner
++         * keeps one chunk, since that throttling exists for latency. Keep
++         * the history on the logical queue, since values from other queues
++         * may interleave on the Vulkan timeline. */
++        uint64_t previous = command_queue->stagger_previous_value;
++        command_queue->stagger_previous_value = value;
++        if (!previous)
++            return;
++        value = previous;
++    }
++
+     memset(&wait_info, 0, sizeof(wait_info));
+     wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+     wait_info.semaphoreCount = 1;
+     wait_info.pSemaphores = &command_queue->vkd3d_queue->submission_timeline;
+-    wait_info.pValues = &command_queue->last_submission_timeline_value;
++    wait_info.pValues = &value;
+ 
+     if ((vr = VK_CALL(vkWaitSemaphores(command_queue->device->vk_device, &wait_info, UINT64_MAX))))
+@@ -25582,11 +25602,14 @@ static void d3d12_command_queue_wait_staggered_submission(struct d3d12_command_q
+ }
+ 
+-static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command_queue *command_queue)
++static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command_queue *command_queue,
++        bool *yields_to_priority)
+ {
+     uint64_t current_time_ns, queue_submit_time_ns;
++    bool ret = false, mixed_types = false;
+     int32_t max_priority;
+-    bool ret = false;
+     unsigned int i;
+ 
++    *yields_to_priority = false;
++
+     if (VKD3D_CONFIG_FLAG_IS_SET(NO_STAGGERED_SUBMIT))
+         return false;
+@@ -25625,11 +25648,18 @@ static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command
+             if (q->desc.Type != command_queue->desc.Type &&
+                     (q->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT || command_queue->desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT))
+-            {
+-                ret = true;
+-                goto unlock;
+-            }
++                mixed_types = true;
+         }
+     }
+ 
++    /* Finish the scan so that the caller also knows whether this queue
++     * yields to an active higher-priority queue. */
++    *yields_to_priority = command_queue->desc.Priority < max_priority;
++
++    if (mixed_types)
++    {
++        ret = true;
++        goto unlock;
++    }
++
+     if (command_queue->desc.Priority == max_priority)
+         goto unlock;
+@@ -25662,4 +25692,5 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
+     VkSemaphoreSubmitInfo *binary_semaphore_info;
+     bool stagger_submissions, is_first, is_last;
++    bool stagger_yields_to_priority;
+     VkSemaphoreSubmitInfo wait_semaphore_info;
+     uint32_t cmd_index, cmd_count, total_cost;
+@@ -25679,5 +25710,6 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
+           command_queue, exec->cmd_count, exec->cmd);
+ 
+-    stagger_submissions = d3d12_command_queue_needs_staggered_submissions(command_queue);
++    stagger_submissions = d3d12_command_queue_needs_staggered_submissions(command_queue,
++            &stagger_yields_to_priority);
+ 
+     if (!(vk_queue = vkd3d_queue_acquire(vkd3d_queue)))
+@@ -25704,4 +25736,11 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
+ #endif
+ 
++    if (command_queue->stagger_submissions != stagger_submissions ||
++            command_queue->stagger_yields_to_priority != stagger_yields_to_priority)
++    {
++        command_queue->stagger_previous_value = 0;
++        command_queue->stagger_yields_to_priority = stagger_yields_to_priority;
++    }
++
+     if (command_queue->stagger_submissions != stagger_submissions)
+     {
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 3139d6d..11a5fe4 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -3006,5 +3006,5 @@ static HRESULT vkd3d_select_queues(const struct d3d12_device *device,
+ 
+     memset(info, 0, sizeof(*info));
+-    single_queue = VKD3D_CONFIG_FLAG_IS_SET(SINGLE_QUEUE);
++    single_queue = VKD3D_CONFIG_FLAG_IS_SET(SINGLE_QUEUE) || d3d12_device_uses_borealis_queue_policy(device);
+ 
+     VK_CALL(vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, NULL));
+diff --git a/libs/vkd3d/device_workarounds.c b/libs/vkd3d/device_workarounds.c
+index bfe7a47..8d59b87 100644
+--- a/libs/vkd3d/device_workarounds.c
++++ b/libs/vkd3d/device_workarounds.c
+@@ -1037,4 +1037,12 @@ void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_i
+         struct d3d12_device *device)
+ {
++    if (d3d12_device_uses_borealis_queue_policy(device))
++    {
++        /* Keep explicit attachment and shader-read layouts on Borealis. This
++         * only changes GPUs on which the driver exposes unified layouts. */
++        info->unified_image_layouts_features.unifiedImageLayouts = VK_FALSE;
++        info->unified_image_layouts_features.unifiedImageLayoutsVideo = VK_FALSE;
++    }
++
+     /* A performance workaround for NV.
+      * The 16 byte offset is a lie, as that is only actually required when we
+@@ -1182,4 +1190,17 @@ bool vkd3d_application_attempts_complex_multiview(void)
+ VKD3D_DEBUG_CONTROL_BEHAVIOR_FLAGS vkd3d_debug_control_get_behavior_flags(void);
+ 
++bool d3d12_device_uses_borealis_queue_policy(const struct d3d12_device *device)
++{
++    /* Borealis reports this driver name on every Apple GPU it drives. No GPU
++     * generation is excluded: every Apple GPU is a tiler, the single queue
++     * only changes devices that expose more than one queue, and the layout
++     * change only applies where the driver exposes unified image layouts.
++     * The driver ID is not the key, since Borealis reports either
++     * VK_DRIVER_ID_MESA_HONEYKRISP or its own ID depending on its
++     * configuration. */
++    return !VKD3D_CONFIG_FLAG_IS_SET(SKIP_DRIVER_WORKAROUNDS) &&
++            !strcmp(device->device_info.vulkan_1_2_properties.driverName, "Borealis");
++}
++
+ void d3d12_device_init_workarounds(struct d3d12_device *device)
+ {
+@@ -1225,4 +1246,14 @@ void d3d12_device_init_workarounds(struct d3d12_device *device)
+     }
+ 
++    if (d3d12_device_uses_borealis_queue_policy(device))
++    {
++        /* Use render-pass-local barriers instead of suspending rendering
++         * across command lists. Set them under either Borealis driver ID,
++         * since only the Honeykrisp ID enables them above. */
++        device->workarounds.tiler_renderpass_barriers = true;
++        device->workarounds.tiler_suspend_resume = false;
++        INFO("Using the Borealis single queue, render-pass barriers and explicit image layouts.\n");
++    }
++
+     /* For testing purposes, allow us to exercise all code paths on all GPUs. */
+     if (vkd3d_debug_control_get_behavior_flags() & VKD3D_DEBUG_CONTROL_BEHAVIOR_ENABLE_TILER_SYNC)
+diff --git a/libs/vkd3d/vkd3d_private.h b/libs/vkd3d/vkd3d_private.h
+index e63dc7b..e9cb02c 100644
+--- a/libs/vkd3d/vkd3d_private.h
++++ b/libs/vkd3d/vkd3d_private.h
+@@ -3939,5 +3939,7 @@ struct d3d12_command_queue
+     uint64_t last_submission_timeline_value;
+     UINT64 last_submission_time_ns;
++    uint64_t stagger_previous_value;
+     bool stagger_submissions;
++    bool stagger_yields_to_priority;
+ 
+     struct vkd3d_fence_worker fence_worker;
+@@ -7276,4 +7278,5 @@ bool vkd3d_application_has_broken_wave128(void);
+ bool vkd3d_application_requires_min16_denorms(void);
+ bool vkd3d_application_attempts_complex_multiview(void);
++bool d3d12_device_uses_borealis_queue_policy(const struct d3d12_device *device);
+ void d3d12_device_init_workarounds(struct d3d12_device *device);
+ uint32_t vkd3d_get_instance_application_version(void);
