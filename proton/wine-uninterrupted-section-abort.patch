@@ -1,0 +1,142 @@
+From: Jonathan Goyvaerts <jonathan.goyvaerts@gmail.com>
+Subject: [PATCH] ntdll: Don't die inside an uninterrupted section when the
+ server kills the thread.
+
+License: LGPL-2.1-or-later, matching dlls/ntdll/unix/server.c and
+dlls/ntdll/unix/unix_private.h. Those files carry Copyright (C) 1998
+and (C) 2020 Alexandre Julliard.
+
+When TerminateThread() hits a thread that is inside an uninterrupted
+section (for instance NtClose() holding fd_cache_mutex around its
+close_handle request), the server closes the thread's request and reply
+pipes. The thread then sees EOF or EPIPE in its next server call and
+calls abort_thread() right there, so pthread_exit() runs with the
+section's mutex still locked. Blocking SIGQUIT in the section does not
+help on this path. Every thread that takes the mutex afterwards hangs
+forever, which makes games hang on exit (Hearthstone: the main thread
+waits for 33 threads, four of them stuck in NtClose on fd_cache_mutex
+owned by a thread that no longer exists).
+
+Count the uninterrupted sections a thread is in. Inside one, a lost
+server connection fails the request with STATUS_THREAD_IS_TERMINATING
+and later requests fail at once, so the caller unwinds through its
+normal error path and releases the mutex; the thread dies when it
+leaves the outermost section. Outside a section it still dies at once.
+
+No reply was read on that path, and the reply shares its buffer with
+the request, so clear it: otherwise server_get_unix_fd() takes the
+request's handle for reply->cacheable and caches the error for that
+handle in the process-wide fd cache.
+
+Signed-off-by: Jonathan Goyvaerts <jonathan.goyvaerts@gmail.com>
+---
+ dlls/ntdll/unix/server.c       | 62 +++++++++++++++++++++++++++-------
+ dlls/ntdll/unix/unix_private.h |  2 ++
+ 2 files changed, 51 insertions(+), 13 deletions(-)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 61b9b30f8d2..41e3cb73e36 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -181,2 +181,20 @@ static DECLSPEC_NORETURN void server_protocol_perror( const char *err )
+ 
++/***********************************************************************
++ *           server_connection_lost
++ *
++ * The server closed this thread's pipes because it terminated the thread.
++ * Inside an uninterrupted section, dying now would leave its mutex locked
++ * forever (and every thread taking it after us hung), so fail the request and
++ * let the caller unwind; the thread dies when it leaves the outermost section.
++ */
++static unsigned int server_connection_lost(void)
++{
++    struct ntdll_thread_data *data = ntdll_get_thread_data();
++
++    if (!data->section_depth) abort_thread( 0 );
++    data->server_gone = TRUE;
++    return STATUS_THREAD_IS_TERMINATING;
++}
++
++
+ /***********************************************************************
+@@ -241,3 +259,3 @@ static unsigned int send_request( const struct __server_request_info *req )
+ 
+-    if (errno == EPIPE) abort_thread(0);
++    if (errno == EPIPE) return server_connection_lost();
+     if (errno == EFAULT) return STATUS_ACCESS_VIOLATION;
+@@ -252,3 +270,3 @@ static unsigned int send_request( const struct __server_request_info *req )
+  */
+-static void read_reply_data( void *buffer, size_t size )
++static unsigned int read_reply_data( void *buffer, size_t size )
+ {
+@@ -260,3 +278,3 @@ static void read_reply_data( void *buffer, size_t size )
+         {
+-            if (!(size -= ret)) return;
++            if (!(size -= ret)) return STATUS_SUCCESS;
+             buffer = (char *)buffer + ret;
+@@ -270,3 +288,3 @@ static void read_reply_data( void *buffer, size_t size )
+     /* the server closed the connection; time to die... */
+-    abort_thread(0);
++    return server_connection_lost();
+ }
+@@ -281,5 +299,8 @@ static inline unsigned int wait_reply( struct __server_request_info *req )
+ {
+-    read_reply_data( &req->u.reply, sizeof(req->u.reply) );
+-    if (req->u.reply.reply_header.reply_size)
+-        read_reply_data( req->reply_data, req->u.reply.reply_header.reply_size );
++    unsigned int ret;
++
++    if ((ret = read_reply_data( &req->u.reply, sizeof(req->u.reply) ))) return ret;
++    if (req->u.reply.reply_header.reply_size &&
++        (ret = read_reply_data( req->reply_data, req->u.reply.reply_header.reply_size )))
++        return ret;
+     return req->u.reply.reply_header.error;
+@@ -296,8 +317,17 @@ unsigned int server_call_unlocked( void *req_ptr )
+ 
+-    FTRACE_BLOCK_START("req %s", req->name)
+-    TRACE_(client)("%s start\n", req->name); \
+-    if (!(ret = send_request( req )))
+-        ret = wait_reply( req );
+-    TRACE_(client)("%s end\n", req->name);
+-    FTRACE_BLOCK_END()
++    if (!ntdll_get_thread_data()->server_gone)
++    {
++        FTRACE_BLOCK_START("req %s", req->name)
++        TRACE_(client)("%s start\n", req->name); \
++        if (!(ret = send_request( req )))
++            ret = wait_reply( req );
++        TRACE_(client)("%s end\n", req->name);
++        FTRACE_BLOCK_END()
++    }
++    if (ntdll_get_thread_data()->server_gone)
++    {
++        /* no reply was read: don't let callers take the request bytes for one */
++        memset( &req->u.reply, 0, sizeof(req->u.reply) );
++        ret = STATUS_THREAD_IS_TERMINATING;
++    }
+     return ret;
+@@ -341,2 +371,4 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
+     mutex_lock( mutex );
++    /* no TEB yet while the first one is being allocated */
++    if (NtCurrentTeb()) ntdll_get_thread_data()->section_depth++;
+ }
+@@ -349,3 +381,7 @@ void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
+ {
++    struct ntdll_thread_data *data = NtCurrentTeb() ? ntdll_get_thread_data() : NULL;
++
++    if (data) data->section_depth--;
+     mutex_unlock( mutex );
++    if (data && !data->section_depth && data->server_gone) abort_thread( 0 );
+     pthread_sigmask( SIG_SETMASK, sigset, NULL );
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index fe0c0cb5940..87e4cd83981 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -119,2 +119,4 @@ struct ntdll_thread_data
+     int                      *fsync_apc_futex;
++    int                       section_depth; /* nesting depth of uninterrupted sections */
++    BOOL                      server_gone;   /* the server closed our pipes: the thread was killed */
+ };
+-- 
+2.56.1
+
