@@ -26,6 +26,10 @@ export WINESERVER="$TOOL/files/bin-arm64/wineserver"
 # primary one. Proton only uses it when WAYLAND_DISPLAY is set; a game opts
 # out with PROTON_ENABLE_WAYLAND=0 in its launch options.
 export PROTON_ENABLE_WAYLAND=${PROTON_ENABLE_WAYLAND-1}
+# GE-Proton's bundled FEX Config.json enables ProfileStats=1 for MangoHud FEX
+# counters, which allocates per-thread SHM stats and instruments every game by
+# default. Disable it unless the caller opts in with FEX_PROFILESTATS=1.
+export FEX_PROFILESTATS=${FEX_PROFILESTATS-0}
 # GE configures its Wine library directories and native FEX bridges. Keep its
 # normal CLI/Steam environment and use the session's public graphics drivers.
 exec "$AURORA_USERPAGES_LAUNCHER" 4k /usr/bin/python3 "$TOOL/proton" "$@"
