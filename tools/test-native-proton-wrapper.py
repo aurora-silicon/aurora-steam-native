@@ -7,16 +7,20 @@ class Contract(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory();self.tool=pathlib.Path(self.temp.name)/'tool with spaces';self.tool.mkdir();shutil.copy2(WRAPPER,self.tool/'aurora-proton')
   bin=self.tool/'files/bin-arm64';bin.mkdir(parents=True)
   for name in ('wine','wineserver'):(bin/name).write_text('unused offline fixture');(bin/name).chmod(0o755)
-  (self.tool/'proton').write_text('import json,os,sys\nprint(json.dumps(dict(args=sys.argv[1:],arm=os.environ.get("PROTON_USE_ARM64"),server=os.environ.get("WINESERVER"),marker=os.environ.get("CONTRACT_MARKER"),wayland=os.environ.get("PROTON_ENABLE_WAYLAND"))))\n')
+  (self.tool/'proton').write_text('import json,os,sys\nprint(json.dumps(dict(args=sys.argv[1:],arm=os.environ.get("PROTON_USE_ARM64"),server=os.environ.get("WINESERVER"),marker=os.environ.get("CONTRACT_MARKER"),wayland=os.environ.get("PROTON_ENABLE_WAYLAND"),profilestats=os.environ.get("FEX_PROFILESTATS"))))\n')
   self.runner=pathlib.Path(self.temp.name)/'offline runner';self.runner.write_text('#!/bin/bash\n[ "$1" = 4k ] || exit 99\nshift\nexec "$@"\n');self.runner.chmod(0o755)
  def tearDown(self):self.temp.cleanup()
  def run_cli(self,*args,**extra):
-  env=dict(os.environ,AURORA_USERPAGES_LAUNCHER=str(self.runner),CONTRACT_MARKER='inherited');env.pop('PROTON_ENABLE_WAYLAND',None);env.update(extra)
+  env=dict(os.environ,AURORA_USERPAGES_LAUNCHER=str(self.runner),CONTRACT_MARKER='inherited');env.pop('PROTON_ENABLE_WAYLAND',None);env.pop('FEX_PROFILESTATS',None);env.update(extra)
   return subprocess.run([str(self.tool/'aurora-proton'),*args],env=env,capture_output=True,text=True)
  def test_wayland_default_on(self):
   r=self.run_cli('run');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(json.loads(r.stdout)['wayland'],'1')
  def test_wayland_opt_out_kept(self):
   r=self.run_cli('run',PROTON_ENABLE_WAYLAND='0');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(json.loads(r.stdout)['wayland'],'0')
+ def test_fex_profilestats_default_off(self):
+  r=self.run_cli('run');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(json.loads(r.stdout)['profilestats'],'0')
+ def test_fex_profilestats_opt_in_kept(self):
+  r=self.run_cli('run',FEX_PROFILESTATS='1');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(json.loads(r.stdout)['profilestats'],'1')
  def test_cli_and_spaces(self):
   r=self.run_cli('run','path with spaces.exe','literal $value');self.assertEqual(r.returncode,0,r.stderr);d=json.loads(r.stdout);self.assertEqual(d['args'],['run','path with spaces.exe','literal $value']);self.assertEqual(d['arm'],'1');self.assertEqual(d['server'],str((self.tool/'files/bin-arm64/wineserver').resolve()));self.assertEqual(d['marker'],'inherited')
  def test_missing_native_component(self):

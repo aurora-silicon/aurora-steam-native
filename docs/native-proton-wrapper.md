@@ -2,7 +2,7 @@
 
 `proton/aurora-proton` is a small public entry point for a GE ARM64 compatibility tool. Install it next to that tool's existing `proton` script, `files/` directory and manifests. Its normal Proton arguments are passed through unchanged. It requires the published Aurora userpages launcher and runs the GE Python entry point under its4K execution mode. Set `AURORA_USERPAGES_LAUNCHER` to the installed public launcher if it is outside PATH and `/usr/libexec/aurora/userpages`.
 
-The wrapper selects `PROTON_USE_ARM64=1` and the tool's native `WINESERVER`. It does not add a `WINELOADER` override: GE chooses the native Wine binary directly. It inherits the caller's remaining environment and driver selection. It does not change Steam's stored choices or prefixes, add graphics-library pins, replace FEX modules, configure audio, or implement any Steam APIs.
+The wrapper selects `PROTON_USE_ARM64=1`, the tool's native `WINESERVER`, `PROTON_ENABLE_WAYLAND=1` (unless overridden), and `FEX_PROFILESTATS=0` (unless overridden, overriding GE-Proton's bundled `"ProfileStats": "1"` config so FEX SHM sampling stats stay off unless requested). It does not add a `WINELOADER` override: GE chooses the native Wine binary directly. It inherits the caller's remaining environment and driver selection. It does not change Steam's stored choices or prefixes, add graphics-library pins, replace FEX modules, configure audio, or implement any Steam APIs.
 
 The implementation contract comes from these public sources:
 
